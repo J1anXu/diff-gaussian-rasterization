@@ -260,6 +260,81 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    def load_ply_with_mask(self, path, use_train_test_exp=False, mask=None):
+        plydata = PlyData.read(path)
+
+        # ----- exposure -----
+        if use_train_test_exp:
+            exposure_file = os.path.join(os.path.dirname(path), os.pardir, os.pardir, "exposure.json")
+            if os.path.exists(exposure_file):
+                with open(exposure_file, "r") as f:
+                    exposures = json.load(f)
+                self.pretrained_exposures = {
+                    image_name: torch.FloatTensor(exposures[image_name]).requires_grad_(False).cuda()
+                    for image_name in exposures
+                }
+                print(f"Pretrained exposures loaded.")
+            else:
+                print(f"No exposure to be loaded at {exposure_file}")
+                self.pretrained_exposures = None
+
+        # ----- read raw arrays -----
+        xyz = np.stack([
+            np.asarray(plydata.elements[0]["x"]),
+            np.asarray(plydata.elements[0]["y"]),
+            np.asarray(plydata.elements[0]["z"]),
+        ], axis=1)
+
+        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+
+        features_dc = np.zeros((xyz.shape[0], 3, 1))
+        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
+        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
+        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
+
+        extra_f_names = sorted(
+            [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")],
+            key=lambda x: int(x.split('_')[-1])
+        )
+        features_extra = np.stack([np.asarray(plydata.elements[0][name]) for name in extra_f_names], axis=1)
+        features_extra = features_extra.reshape((xyz.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+
+        scale_names = sorted(
+            [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")],
+            key=lambda x: int(x.split('_')[-1])
+        )
+        scales = np.stack([np.asarray(plydata.elements[0][name]) for name in scale_names], axis=1)
+
+        rot_names = sorted(
+            [p.name for p in plydata.elements[0].properties if p.name.startswith("rot")],
+            key=lambda x: int(x.split('_')[-1])
+        )
+        rots = np.stack([np.asarray(plydata.elements[0][name]) for name in rot_names], axis=1)
+
+        # ----- apply mask -----
+        mask = np.asarray(mask, dtype=np.int64)
+        xyz = xyz[mask]
+        opacities = opacities[mask]
+        features_dc = features_dc[mask]
+        features_extra = features_extra[mask]
+        scales = scales[mask]
+        rots = rots[mask]
+
+        # ----- convert to tensors -----
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda")
+                                        .transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda")
+                                        .transpose(1, 2).contiguous().requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+
+        self.active_sh_degree = self.max_sh_degree
+
+
+
+
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
         if use_train_test_exp:
