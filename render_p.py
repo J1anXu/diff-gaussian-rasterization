@@ -45,28 +45,27 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         final_render = None
         for block_idx in range(len(gaussians_list)):
-            out = render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
-            rendering = out["render"]
-            depth = out["depth"]
-            alphaLeft = out["alphaLeft"]
-            render_list.append(rendering)
-            depth_list.append(depth)
+            rendered, viewspace_points, visibility_filter, radii, depth_image, alphaLeft = (render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh))
+            render_list.append(rendered)
+            depth_list.append(depth_image)
             alphaLeft_list.append(alphaLeft)
-            torchvision.utils.save_image(rendering, os.path.join(render_path,'{0:05d}'.format(idx) + f'_block_{block_idx}' + ".png"))
+            torchvision.utils.save_image(rendered, os.path.join(render_path,'{0:05d}'.format(idx) + f'_block_{block_idx}' + ".png"))
             if final_render is None:
-                final_render = rendering.clone()
+                final_render = rendered.clone()
             else:
-                final_render += rendering
+                final_render += rendered
             # 裁剪到 [0,1]
             final_render = final_render.clamp(0, 1)
+        
+        # TODO block 按照深度排序然后用alphaLeft_list来融合 注意确实是用depth图来排序的
             
-        torchvision.utils.save_image(final_render, os.path.join(render_path,'{0:05d}'.format(idx)+'_final' + ".png"))
+        # torchvision.utils.save_image(final_render, os.path.join(render_path,'{0:05d}'.format(idx)+'_final' + ".png"))
         gt = view.original_image[0:3, :, :]
         if args.train_test_exp:
-            rendering = rendering[..., rendering.shape[-1] // 2:]
+            rendered = rendered[..., rendered.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
 
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(rendered, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
