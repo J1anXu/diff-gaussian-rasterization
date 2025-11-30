@@ -41,14 +41,17 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
     makedirs(gts_path, exist_ok=True)
     render_list = []
     depth_list = []
+    alphaLeft_list = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         final_render = None
         for block_idx in range(len(gaussians_list)):
             out = render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
             rendering = out["render"]
             depth = out["depth"]
+            alphaLeft = out["alphaLeft"]
             render_list.append(rendering)
             depth_list.append(depth)
+            alphaLeft_list.append(alphaLeft)
             torchvision.utils.save_image(rendering, os.path.join(render_path,'{0:05d}'.format(idx) + f'_block_{block_idx}' + ".png"))
             if final_render is None:
                 final_render = rendering.clone()
