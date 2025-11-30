@@ -52,6 +52,7 @@ namespace CudaRasterizer
 			float* depth,
 			bool antialiasing,
 			int* radii = nullptr,
+			float* alphaLeft = nullptr,
 			bool debug = false);
 
 		static void backward(

@@ -219,6 +219,7 @@ int CudaRasterizer::Rasterizer::forward(
 	float* depth,
 	bool antialiasing,
 	int* radii,
+	float* alphaLeft,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -336,7 +337,7 @@ int CudaRasterizer::Rasterizer::forward(
 		out_color,
 		geomState.depths,
 		depth), debug)
-
+	CHECK_CUDA(cudaMemcpy(alphaLeft, imgState.accum_alpha, width * height * sizeof(float), cudaMemcpyDeviceToDevice), debug);
 	return num_rendered;
 }
 
