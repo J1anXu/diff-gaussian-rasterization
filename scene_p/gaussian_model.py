@@ -64,6 +64,7 @@ class GaussianModel:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+        self.on_gpu = False
 
     def capture(self):
         return (
@@ -321,15 +322,26 @@ class GaussianModel:
         rots = rots[mask]
 
         # ----- convert to tensors -----
-        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda")
+        # self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
+        # self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda")
+        #                                 .transpose(1, 2).contiguous().requires_grad_(True))
+        # self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda")
+        #                                 .transpose(1, 2).contiguous().requires_grad_(True))
+        # self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
+        # self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
+        # self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        
+        # ----- 让所有参数先在 CPU ，需要用到再搬到 GPU 上 -----
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float).requires_grad_(True))
+        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float)
                                         .transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda")
+        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float)
                                         .transpose(1, 2).contiguous().requires_grad_(True))
-        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float).requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float).requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float).requires_grad_(True))
 
+        
         self.active_sh_degree = self.max_sh_degree
 
 
@@ -387,6 +399,26 @@ class GaussianModel:
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
+
+    def to_gpu(self):
+        self._xyz = nn.Parameter(self._xyz.cuda())
+        self._features_dc = nn.Parameter(self._features_dc.cuda())
+        self._features_rest = nn.Parameter(self._features_rest.cuda())
+        self._opacity = nn.Parameter(self._opacity.cuda())
+        self._scaling = nn.Parameter(self._scaling.cuda())
+        self._rotation = nn.Parameter(self._rotation.cuda())
+        self.on_gpu = True
+        
+    def to_cpu(self):
+        self._xyz = nn.Parameter(self._xyz.cpu())
+        self._features_dc = nn.Parameter(self._features_dc.cpu())
+        self._features_rest = nn.Parameter(self._features_rest.cpu())
+        self._opacity = nn.Parameter(self._opacity.cpu())
+        self._scaling = nn.Parameter(self._scaling.cpu())
+        self._rotation = nn.Parameter(self._rotation.cpu())
+        torch.cuda.empty_cache()   # 释放缓存
+        self.on_gpu = False
+
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

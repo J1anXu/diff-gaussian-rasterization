@@ -125,14 +125,20 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
     alphaLeft_list = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         for block_idx in range(len(gaussians_list)):
-            out = render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
+            
+            curr_gaussian = gaussians_list[block_idx]
+            curr_gaussian.to_gpu()
+            out = render(view, curr_gaussian, pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
+            curr_gaussian.to_cpu()
             
             rendered = out["render"]
             depth = out["depth"]
             alphaLeft = out["alphaLeft"]
+            
             render_list.append(rendered.cpu())
             depth_list.append(depth.cpu())
             alphaLeft_list.append(alphaLeft.cpu())
+            
             if DEBUG:
                 torchvision.utils.save_image(rendered, os.path.join(debug_path, 'view_{0:05d}_block_{1:03d}_render.png'.format(idx, block_idx)))
                 
