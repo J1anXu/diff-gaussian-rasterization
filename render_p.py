@@ -43,30 +43,36 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
     depth_list = []
     alphaLeft_list = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        final_render = None
         for block_idx in range(len(gaussians_list)):
             rendered, viewspace_points, visibility_filter, radii, depth_image, alphaLeft = (render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh))
             render_list.append(rendered)
             depth_list.append(depth_image)
             alphaLeft_list.append(alphaLeft)
             torchvision.utils.save_image(rendered, os.path.join(render_path,'{0:05d}'.format(idx) + f'_block_{block_idx}' + ".png"))
-            if final_render is None:
-                final_render = rendered.clone()
-            else:
-                final_render += rendered
-            # 裁剪到 [0,1]
-            final_render = final_render.clamp(0, 1)
+
         
         # TODO block 按照深度排序然后用alphaLeft_list来融合 注意确实是用depth图来排序的
-            
-        # torchvision.utils.save_image(final_render, os.path.join(render_path,'{0:05d}'.format(idx)+'_final' + ".png"))
+        # 1. 收集所有 GPU 的渲染结果
+        # 2. 根据 depth / invdepth 对所有 GPU 结果排序
+        # 3. 
+    
+        
+        
         gt = view.original_image[0:3, :, :]
         if args.train_test_exp:
             rendered = rendered[..., rendered.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
-
-        torchvision.utils.save_image(rendered, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+
+
+        directly_blending = None
+        for rendered, depth_image, alphaLeft in zip(render_list, depth_list, alphaLeft_list):
+            if directly_blending is None:
+                    directly_blending = rendered.clone()
+            else:
+                directly_blending += rendered
+            directly_blending = directly_blending.clamp(0, 1)
+        torchvision.utils.save_image(directly_blending, os.path.join(render_path,'{0:05d}'.format(idx)+'_directly_blending' + ".png"))
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
