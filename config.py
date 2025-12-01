@@ -1,3 +1,3 @@
 # config.py
 DEBUG_MODE = True
-DATASIZE_LIMIT = 2
+DATASIZE_LIMIT = 100

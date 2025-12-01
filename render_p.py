@@ -23,7 +23,7 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from scene_p.gaussian_model import GaussianModel as GaussianModel_p
-
+import config
 from utils.system_utils import searchForMaxIteration
 from partition.partition import generate_block_masks
 try:
@@ -31,9 +31,8 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
-
+DEBUG = False
 import torch
-DEBUG = True
 
 
 def merge(render_list, depth_list, alphaLeft_list, eps=1e-10):
@@ -127,12 +126,13 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         for block_idx in range(len(gaussians_list)):
             out = render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
+            
             rendered = out["render"]
             depth = out["depth"]
             alphaLeft = out["alphaLeft"]
-            render_list.append(rendered)
-            depth_list.append(depth)
-            alphaLeft_list.append(alphaLeft)
+            render_list.append(rendered.cpu())
+            depth_list.append(depth.cpu())
+            alphaLeft_list.append(alphaLeft.cpu())
             if DEBUG:
                 torchvision.utils.save_image(rendered, os.path.join(debug_path, 'view_{0:05d}_block_{1:03d}_render.png'.format(idx, block_idx)))
                 
@@ -157,6 +157,11 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
                     directly_blending += rendered
                 directly_blending = directly_blending.clamp(0, 1)
             torchvision.utils.save_image(directly_blending, os.path.join(debug_path,'{0:05d}'.format(idx)+'_directly_blending' + ".png"))
+            
+        render_list.clear()
+        depth_list.clear()
+        alphaLeft_list.clear()
+        torch.cuda.empty_cache()
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():

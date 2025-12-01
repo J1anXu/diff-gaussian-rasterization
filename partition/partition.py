@@ -53,7 +53,7 @@ def split_block(block, xyz, max_size):
 # ============================================
 #       主函数：均衡 KD-tree 划分
 # ============================================
-def generate_block_masks(ply_path, max_size=100000, vis_path="balanced_blocks.png"):
+def generate_block_masks(ply_path, max_size=100000, vis_path="blocks_visualization.png"):
 
     print(f"[INFO] Loading {ply_path}")
     ply = PlyData.read(ply_path)
