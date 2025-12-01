@@ -33,22 +33,31 @@ except:
     SPARSE_ADAM_AVAILABLE = False
 
 import torch
+DEBUG = True
 
-def composite_multi_block_debug(render_list, depth_list, alphaLeft_list, eps=1e-10):
+
+def merge(render_list, depth_list, alphaLeft_list, eps=1e-10):
     """
-    Multi-block compositing with debug info, fully aligned with GPU gather logic.
-    
+    Multi-block compositing for partitioned Gaussian rendering.
+
+    Combines per-block RGB, depth, and alpha outputs using depth-aware
+    alpha blending to reconstruct the final image.
+
     Args:
-        render_list: list of [3,H,W] tensors, length K
-        depth_list:  list of [1,H,W] tensors, length K
-        alphaLeft_list: list of [1,H,W] tensors, length K
+        render_list (list[Tensor]): List of [3, H, W] RGB tensors.
+        depth_list (list[Tensor]): List of [1, H, W] depth tensors.
+        alphaLeft_list (list[Tensor]): List of [1, H, W] alpha/transmittance tensors.
 
     Returns:
-        final_rgb: composited RGB image [3,H,W]
-        bg_rgb: background RGB image [3,H,W]
+        final_rgb (Tensor): Composited RGB image of shape [3, H, W].
+        bg_rgb (Tensor): Background RGB residual of shape [3, H, W].
+
+    Author: Jian Xu
+    Date:   2025-11-30
+    Email:  jxx3451@mavs.uta.edu
     """
-    def info(name, x):
-        print(f"{name}: shape={x.shape}, min={x.min().item():.6f}, max={x.max().item():.6f}, mean={x.mean().item():.6f}")
+
+
 
     # ------------------------
     # 0. stack tensors
@@ -57,9 +66,7 @@ def composite_multi_block_debug(render_list, depth_list, alphaLeft_list, eps=1e-
     alphas  = torch.stack(alphaLeft_list, dim=0)    # [K,1,H,W]
     invD    = torch.stack(depth_list, dim=0)  # [K,1,H,W]
 
-    info("renders", renders)
-    info("alphas", alphas)
-    info("invD", invD)
+
 
     K, C, H, W = renders.shape
 
@@ -78,8 +85,7 @@ def composite_multi_block_debug(render_list, depth_list, alphaLeft_list, eps=1e-
     # 再加回 channel 维度
     front_alphas = front_alphas_squeezed.unsqueeze(1)  # [K,1,H,W] # [K,1,H,W]
 
-    info("front_rgbs (sorted)", front_rgbs)
-    info("front_alphas (sorted)", front_alphas)
+
 
     # ------------------------
     # 2. forward compositing
@@ -88,9 +94,7 @@ def composite_multi_block_debug(render_list, depth_list, alphaLeft_list, eps=1e-
     prefix_T = torch.cat([torch.ones_like(cumT[:1]), cumT[:-1]], dim=0)  # [K,1,H,W]
     final_rgb = (prefix_T * front_rgbs).sum(dim=0)             # [3,H,W]
 
-    info("cumT", cumT)
-    info("prefix_T", prefix_T)
-    info("final_rgb (pre-clamp)", final_rgb)
+
 
     # ------------------------
     # 3. background color
@@ -106,74 +110,53 @@ def composite_multi_block_debug(render_list, depth_list, alphaLeft_list, eps=1e-
     suffix_color = scale * suffix_sum_C
     bg_rgb = suffix_color[0]
 
-    info("log_front_Ts", log_front_Ts)
-    info("inv_scale", inv_scale)
-    info("C_scaled", C_scaled)
-    info("suffix_sum_C", suffix_sum_C)
-    info("suffix_color", suffix_color)
-    info("bg_rgb", bg_rgb)
 
     return final_rgb, bg_rgb
 
 def render_set(model_path, name, iteration, views, gaussians_list, pipeline, background, train_test_exp, separate_sh):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
-
+    debug_path = os.path.join(model_path, name, "ours_{}".format(iteration), "blockwise_renders")
+    
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+    makedirs(debug_path, exist_ok=True)
     render_list = []
     depth_list = []
     alphaLeft_list = []
-    debug_dir = os.path.join(render_path, "debug_blocks")
-    os.makedirs(debug_dir, exist_ok=True)
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         for block_idx in range(len(gaussians_list)):
             out = render(view, gaussians_list[block_idx], pipeline, background, use_trained_exp=train_test_exp, separate_sh=separate_sh)
             rendered = out["render"]
             depth = out["depth"]
             alphaLeft = out["alphaLeft"]
-        
-             # 创建调试目录
             render_list.append(rendered)
             depth_list.append(depth)
             alphaLeft_list.append(alphaLeft)
-            
-            # 保存为 .pt 数据文件
-            torch.save(
-                {
-                    "render": rendered.detach().cpu(),
-                    "depth": depth.detach().cpu(),
-                    "alphaLeft": alphaLeft.detach().cpu(),
-                    "block_idx": block_idx,
-                    "frame_idx": idx,  # 假设外层循环是 idx
-                },
-                os.path.join(debug_dir, f"{idx:05d}_block_{block_idx}.pt")
-            )
-
-            torchvision.utils.save_image(rendered, os.path.join(render_path,'{0:05d}'.format(idx) + f'_block_{block_idx}' + ".png"))
-
-        
-        # TODO block 按照深度排序然后用alphaLeft_list来融合 注意确实是用depth图来排序的
-        final_rendered, bg_rgb = composite_multi_block_debug(render_list, depth_list, alphaLeft_list)
-        final_rendered = final_rendered.clamp(0, 1)
-        torchvision.utils.save_image(final_rendered, os.path.join(render_path, '{0:05d}'.format(idx) + '_final.png'))
+            if DEBUG:
+                torchvision.utils.save_image(rendered, os.path.join(debug_path, 'view_{0:05d}_block_{1:03d}_render.png'.format(idx, block_idx)))
+                
+        blockwise_composited, bg_rgb = merge(render_list, depth_list, alphaLeft_list)
+        blockwise_composited = blockwise_composited.clamp(0, 1)
+        torchvision.utils.save_image(blockwise_composited, os.path.join(render_path, '{0:05d}'.format(idx) + '.png'))
         
         
         gt = view.original_image[0:3, :, :]
+        # 左右拼接 gt | rendered for comparison
         if args.train_test_exp:
-            rendered = rendered[..., rendered.shape[-1] // 2:]
+            blockwise_composited = blockwise_composited[..., blockwise_composited.shape[-1] // 2:]
             gt = gt[..., gt.shape[-1] // 2:]
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-
-        directly_blending = None
-        for rendered, depth_image, alphaLeft in zip(render_list, depth_list, alphaLeft_list):
-            if directly_blending is None:
-                    directly_blending = rendered.clone()
-            else:
-                directly_blending += rendered
-            directly_blending = directly_blending.clamp(0, 1)
-        torchvision.utils.save_image(directly_blending, os.path.join(render_path,'{0:05d}'.format(idx)+'_directly_blending' + ".png"))
+        if DEBUG:
+            directly_blending = None
+            for rendered, depth_image, alphaLeft in zip(render_list, depth_list, alphaLeft_list):
+                if directly_blending is None:
+                        directly_blending = rendered.clone()
+                else:
+                    directly_blending += rendered
+                directly_blending = directly_blending.clamp(0, 1)
+            torchvision.utils.save_image(directly_blending, os.path.join(debug_path,'{0:05d}'.format(idx)+'_directly_blending' + ".png"))
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, separate_sh: bool):
     with torch.no_grad():
