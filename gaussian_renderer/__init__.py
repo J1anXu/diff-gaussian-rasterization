@@ -127,3 +127,81 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         }
     
     return out
+
+
+def merge(render_list, depth_list, alphaLeft_list, eps=1e-10):
+    """
+    Multi-block compositing for partitioned Gaussian rendering.
+
+    Combines per-block RGB, depth, and alpha outputs using depth-aware
+    alpha blending to reconstruct the final image.
+
+    Args:
+        render_list (list[Tensor]): List of [3, H, W] RGB tensors.
+        depth_list (list[Tensor]): List of [1, H, W] depth tensors.
+        alphaLeft_list (list[Tensor]): List of [1, H, W] alpha/transmittance tensors.
+
+    Returns:
+        final_rgb (Tensor): Composited RGB image of shape [3, H, W].
+        bg_rgb (Tensor): Background RGB residual of shape [3, H, W].
+
+    Author: Jian Xu
+    Date:   2025-11-30
+    Email:  jxx3451@mavs.uta.edu
+    """
+
+
+
+    # ------------------------
+    # 0. stack tensors
+    # ------------------------
+    renders = torch.stack(render_list, dim=0)       # [K,3,H,W]
+    alphas  = torch.stack(alphaLeft_list, dim=0)    # [K,1,H,W]
+    invD    = torch.stack(depth_list, dim=0)  # [K,1,H,W]
+
+
+
+    K, C, H, W = renders.shape
+
+    # ------------------------
+    # 1. sort pixels along depth
+    # ------------------------
+    sort_idx = torch.argsort(invD.squeeze(1), dim=0, descending=True)  # [K,H,W]
+    idx_rgb = sort_idx.unsqueeze(1).expand(-1, C, -1, -1)    # [K,3,H,W]
+    idx_alpha = sort_idx.unsqueeze(1).expand(-1, 1, -1, -1)  # [K,1,H,W]
+
+    front_rgbs = torch.gather(renders, 0, idx_rgb)     # [K,3,H,W]
+    # alpha 原始是 [K,1,H,W] → squeeze 变 [K,H,W]
+    alphas_squeezed = alphas.squeeze(1)  # [K,H,W]
+    # gather 排序
+    front_alphas_squeezed = torch.gather(alphas_squeezed, 0, sort_idx)  # [K,H,W]
+    # 再加回 channel 维度
+    front_alphas = front_alphas_squeezed.unsqueeze(1)  # [K,1,H,W] # [K,1,H,W]
+
+
+
+    # ------------------------
+    # 2. forward compositing
+    # ------------------------
+    cumT = torch.cumprod(front_alphas, dim=0)                  # [K,1,H,W]
+    prefix_T = torch.cat([torch.ones_like(cumT[:1]), cumT[:-1]], dim=0)  # [K,1,H,W]
+    final_rgb = (prefix_T * front_rgbs).sum(dim=0)             # [3,H,W]
+
+
+
+    # ------------------------
+    # 3. background color
+    # ------------------------
+    log_front_Ts = torch.log(front_alphas.clamp(min=eps))      # [K,1,H,W]
+    log_post_prod_inc = torch.cumsum(log_front_Ts.flip(0), dim=0).flip(0)
+    log_post_prod_shift = torch.cat([log_post_prod_inc[1:], torch.zeros_like(log_post_prod_inc[:1])], dim=0)
+
+    inv_scale = torch.exp(-log_post_prod_inc).clamp(max=1e6)
+    C_scaled = front_rgbs * inv_scale
+    suffix_sum_C = torch.cumsum(C_scaled.flip(0), dim=0).flip(0) - C_scaled
+    scale = torch.exp(log_post_prod_shift)
+    suffix_color = scale * suffix_sum_C
+    bg_rgb = suffix_color[0]
+
+
+    return final_rgb, bg_rgb
