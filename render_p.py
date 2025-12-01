@@ -25,7 +25,7 @@ from gaussian_renderer import GaussianModel
 from scene_p.gaussian_model import GaussianModel as GaussianModel_p
 import config
 from utils.system_utils import searchForMaxIteration
-from partition.partition import generate_block_masks
+from partition.partition import generate_block_masks_from_ply
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
@@ -104,7 +104,7 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         scene_list = []
         loaded_iter = searchForMaxIteration(os.path.join(dataset.model_path, "point_cloud"))
         ply_path = os.path.join(dataset.model_path,"point_cloud", "iteration_" + str(loaded_iter), "point_cloud.ply")
-        xyz, block_masks = generate_block_masks(ply_path, max_size = 500_000)
+        xyz, block_masks = generate_block_masks_from_ply(ply_path, max_size = 500_000)
         total = len(block_masks)
 
         with tqdm(total=total, desc="Building blocks", ncols=100) as pbar:

@@ -50,22 +50,8 @@ def split_block(block, xyz, max_size):
     return left_block, right_block
 
 
-# ============================================
-#       主函数：均衡 KD-tree 划分
-# ============================================
-def generate_block_masks(ply_path, max_size=100000, vis_path="blocks_visualization.png"):
-
-    print(f"[INFO] Loading {ply_path}")
-    ply = PlyData.read(ply_path)
-
-    xyz = np.stack([
-        ply['vertex']['x'],
-        ply['vertex']['y'],
-        ply['vertex']['z']
-    ], axis=1)
-
+def generate_block_masks(xyz, max_size=100000):
     N = xyz.shape[0]
-    print(f"[INFO] Loaded {N:,} points")
 
     mins = xyz.min(0)
     maxs = xyz.max(0)
@@ -98,6 +84,25 @@ def generate_block_masks(ply_path, max_size=100000, vis_path="blocks_visualizati
     # 输出每个 block 大小
     for i, mask in enumerate(block_masks):
         print(f"  Block {i:3d}: {len(mask):7d} points")
+    return block_masks, blocks
+
+
+# ============================================
+#       主函数：均衡 KD-tree 划分
+# ============================================
+def generate_block_masks_from_ply(ply_path, max_size=100000, vis_path="blocks_visualization.png"):
+
+    print(f"[INFO] Loading {ply_path}")
+    ply = PlyData.read(ply_path)
+
+    xyz = np.stack([
+        ply['vertex']['x'],
+        ply['vertex']['y'],
+        ply['vertex']['z']
+    ], axis=1)
+    N = xyz.shape[0]
+    print(f"[INFO] Loaded {N:,} points")
+    block_masks, blocks = generate_block_masks(xyz, max_size)
 
     # 可视化
     visualize_blocks_3d(blocks, vis_path)
