@@ -116,7 +116,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         xyz, block_masks = generate_block_masks(gaussians._xyz, max_size = 500_000)
 
-
+        # TODO
+        # Step1. 拆分出N个子高斯Model 分别渲染 拼出一个完整的结果
+        # Step2. 再遍历一遍, 把每个高斯Model送上GPU, 然后反向传播更新它
+        # Step3. 把所有反向传播更新过的高斯属性copy到母高斯上
+        # Step4. 更新exposure(即使梯度是累计的也没关系,因为每个子高斯Model之间没有重叠高斯)
+        
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
         
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
