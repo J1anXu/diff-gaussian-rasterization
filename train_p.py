@@ -26,6 +26,7 @@ import wandb
 import time
 from partition.partition import generate_block_masks
 from logger import get_logger
+import torchvision
 WANDB = True
 LOGGER = None
 try:
@@ -137,13 +138,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             cached_viewspace_points = []
             cache_visibility_filter = []
             cache_radii = []
-            
+            count = 0
             with torch.no_grad():
                 for inactive_mask in inactive_mask_list:
                     if len(inactive_mask) == 0:
                         continue
                     #FIXME - 你这里根本没把subeset发到cuda上。。
                     out = render_subset(inactive_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    img = out["render"].detach().cpu()
+                    # 保存到本地
+                    save_path = f"debug/block_{count}.png"
+                    torchvision.utils.save_image(img, save_path)
+                    count += 1
+                    
                     cached_renders.append(out["render"])
                     cached_depths.append(out["depth"])
                     cached_alphas.append(out["alphaLeft"])
