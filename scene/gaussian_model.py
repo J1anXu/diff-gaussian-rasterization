@@ -51,20 +51,85 @@ class GaussianModel:
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree  
+        
+        # -------- CPU master parameters --------
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        
+        # -------- optimizer buffers (CPU) --------
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.setup_functions()
+        
+        # ----- subset mode -----
+        self.subset_mode = False
+        self.subset_indices = None
 
+        # GPU subset buffers
+        self._xyz_gpu = None
+        self._opacity_gpu = None
+        self._scaling_gpu = None
+        self._rotation_gpu = None
+        self._features_dc_gpu = None
+        self._features_rest_gpu = None
+
+        self.setup_functions()
+        
+        
+        
+    def _to_cpu_index(self, idx):
+        if not torch.is_tensor(idx):
+            idx = torch.tensor(idx, dtype=torch.long)
+        return idx.to("cpu")
+
+        
+    # =============================
+    #  Subset control API
+    # =============================
+    def start_subset(self, subset_indices):
+        self.subset_mode = True
+
+        # 1. subset index 保存在 CPU
+        idx = self._to_cpu_index(subset_indices)
+        self.subset_indices = idx
+
+        # 2. 从 CPU master 参数选当前 block 的数据
+        # 然后拷贝到 GPU（只拷子集）
+        self._xyz_gpu           = self._xyz[idx].cuda(non_blocking=True)
+        self._opacity_gpu       = self._opacity[idx].cuda(non_blocking=True)
+        self._scaling_gpu       = self._scaling[idx].cuda(non_blocking=True)
+        self._rotation_gpu      = self._rotation[idx].cuda(non_blocking=True)
+        self._features_dc_gpu   = self._features_dc[idx].cuda(non_blocking=True)
+        self._features_rest_gpu = self._features_rest[idx].cuda(non_blocking=True)
+
+        
+    def end_subset(self):
+        self.subset_mode = False
+        self.subset_indices = None
+
+        # 删除 GPU 子集参数以释放显存
+        del self._xyz_gpu
+        del self._opacity_gpu
+        del self._scaling_gpu
+        del self._rotation_gpu
+        del self._features_dc_gpu
+        del self._features_rest_gpu
+
+        self._xyz_gpu = None
+        self._opacity_gpu = None
+        self._scaling_gpu = None
+        self._rotation_gpu = None
+        self._features_dc_gpu = None
+        self._features_rest_gpu = None
+  
+        
     def capture(self):
         return (
             self.active_sh_degree,
@@ -101,32 +166,49 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
+        if self.subset_mode:
+            return self.scaling_activation(self._scaling_gpu)
         return self.scaling_activation(self._scaling)
-    
+
     @property
     def get_rotation(self):
+        if self.subset_mode:
+            return self.rotation_activation(self._rotation_gpu)
         return self.rotation_activation(self._rotation)
     
     @property
     def get_xyz(self):
+        if self.subset_mode:
+            return self._xyz_gpu
         return self._xyz
     
     @property
     def get_features(self):
-        features_dc = self._features_dc
-        features_rest = self._features_rest
+        if self.subset_mode:
+            features_dc = self._features_dc_gpu
+            features_rest = self._features_rest_gpu
+        else:
+            features_dc = self._features_dc
+            features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
     
     @property
     def get_features_dc(self):
+        if self.subset_mode:
+            return self._features_dc_gpu
         return self._features_dc
+
     
     @property
     def get_features_rest(self):
+        if self.subset_mode:
+            return self._features_rest_gpu
         return self._features_rest
     
     @property
     def get_opacity(self):
+        if self.subset_mode:
+            return self.opacity_activation(self._opacity_gpu)
         return self.opacity_activation(self._opacity)
     
     @property
@@ -140,6 +222,8 @@ class GaussianModel:
             return self.pretrained_exposures[image_name]
     
     def get_covariance(self, scaling_modifier = 1):
+        if self.subset_mode:
+            return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation_gpu)
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
     def oneupSHdegree(self):
@@ -188,28 +272,55 @@ class GaussianModel:
         self._exposure = torch.eye(3, 4, device=device)[None].repeat(len(cam_infos), 1, 1).clone().requires_grad_(False)
 
 
+    # def training_setup(self, training_args):
+    #     self.percent_dense = training_args.percent_dense
+    #     self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+    #     self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+    #     l = [
+    #         {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
+    #         {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
+    #         {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
+    #         {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+    #         {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+    #         {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+    #     ]
+
+    #     if self.optimizer_type == "default":
+    #         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+    #     elif self.optimizer_type == "sparse_adam":
+    #         try:
+    #             self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
+    #         except:
+    #             # A special version of the rasterizer is required to enable sparse adam
+    #             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+
+    #     self.exposure_optimizer = torch.optim.Adam([self._exposure])
+
+    #     self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
+    #                                                 lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+    #                                                 lr_delay_mult=training_args.position_lr_delay_mult,
+    #                                                 max_steps=training_args.position_lr_max_steps)
+        
+    #     self.exposure_scheduler_args = get_expon_lr_func(training_args.exposure_lr_init, training_args.exposure_lr_final,
+    #                                                     lr_delay_steps=training_args.exposure_lr_delay_steps,
+    #                                                     lr_delay_mult=training_args.exposure_lr_delay_mult,
+    #                                                     max_steps=training_args.iterations)
+
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        
+        # master 参数在 CPU 上，xyz_gradient_accum / denom 也放 CPU（方便和 master 对齐）
+        N = self._xyz.shape[0]
+        self.xyz_gradient_accum = torch.zeros((N, 1), device="cpu")
+        self.denom = torch.zeros((N, 1), device="cpu")
 
-        l = [
-            {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
-            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
-        ]
-
-        if self.optimizer_type == "default":
-            self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        elif self.optimizer_type == "sparse_adam":
-            try:
-                self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
-            except:
-                # A special version of the rasterizer is required to enable sparse adam
-                self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
+        # 其他参数保持常数LR（原版设定）
+        self.feature_dc_lr      = training_args.feature_lr
+        self.feature_rest_lr    = training_args.feature_lr / 20.0
+        self.opacity_lr         = training_args.opacity_lr
+        self.scaling_lr         = training_args.scaling_lr
+        self.rotation_lr        = training_args.rotation_lr
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
 
@@ -222,6 +333,9 @@ class GaussianModel:
                                                         lr_delay_steps=training_args.exposure_lr_delay_steps,
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
                                                         max_steps=training_args.iterations)
+
+
+
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -494,4 +608,45 @@ class GaussianModel:
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        self.denom[update_filter] += 1
+        self.denom[update_filter] += 1 # denom = 每个 Gaussian 被“观察到/产生梯度”的次数（visibility count） 平均梯度 = 累积梯度 / 出现次数(denom)
+
+
+
+    def set_requires_grad_by_mask(self, indices, flag: bool):
+        """
+        Only set requires_grad for selected Gaussians (subset).
+        indices: list or tensor of valid Gaussian indices
+        flag: True/False
+        """
+        idx = torch.as_tensor(indices, dtype=torch.long, device=self._xyz.device)
+
+        # XYZ
+        self._xyz.requires_grad_(False)
+        self._xyz[idx].requires_grad = flag
+
+        # scaling
+        self._scaling.requires_grad_(False)
+        self._scaling[idx].requires_grad = flag
+
+        # rotation
+        self._rotation.requires_grad_(False)
+        self._rotation[idx].requires_grad = flag
+
+        # opacity
+        self._opacity.requires_grad_(False)
+        self._opacity[idx].requires_grad = flag
+
+        # SH features: shape [S, N, C]
+        self._features_dc.requires_grad_(False)
+        self._features_dc[idx, :, :].requires_grad = flag
+
+        self._features_rest.requires_grad_(False)
+        self._features_rest[idx, :, :].requires_grad = flag
+
+    def set_requires_grad_by_masks(self, mask_list, flag: bool):
+        """
+        Apply set_requires_grad_by_mask for multiple masks.
+        mask_list: list of list/tensors of indices
+        """
+        for m in mask_list:
+            self.set_requires_grad_by_mask(m, flag)

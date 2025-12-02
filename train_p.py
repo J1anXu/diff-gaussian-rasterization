@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, render_subset, merge, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -76,26 +76,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    
+    # ============================================================
+    #   Partitioned Training Loop (recommended full structure)
+    # ============================================================
+
+    just_densified = False
+    
     for iteration in range(first_iter, opt.iterations + 1):
-        if network_gui.conn == None:
-            network_gui.try_connect()
-        while network_gui.conn != None:
-            try:
-                net_image_bytes = None
-                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
-                if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
-                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-                network_gui.send(net_image_bytes, dataset.source_path)
-                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-                    break
-            except Exception as e:
-                network_gui.conn = None
-
         iter_start.record()
-
-        gaussians.update_learning_rate(iteration)
-
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
@@ -113,50 +102,122 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             pipe.debug = True
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
+
+        # --------------------------
+        # split into blocks (only when densified)
+        # --------------------------
+        if iteration == first_iter or just_densified:
+            block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 10_000)
+            block_masks = [m for m in block_masks if len(m) > 0]
+
+            just_densified = False
+
+
+        K = len(block_masks)
+        # ==========================
+        #        外循环：block-wise
+        # ==========================
+        for block_id in range(K):
+            active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
+
+            inactive_mask_list = [
+                torch.as_tensor(block_masks[i], dtype=torch.long, device=gaussians._xyz.device)
+                for i in range(K)
+                if i != block_id and len(block_masks[i]) > 0
+            ]
+
+
+            
+            # -------------------------------------------
+            # 1. cache inactive blocks (no grad)
+            # -------------------------------------------
+            cached_renders = []
+            cached_depths  = []
+            cached_alphas  = []
+            cached_viewspace_points = []
+            cache_visibility_filter = []
+            cache_radii = []
+            
+            with torch.no_grad():
+                for inactive_mask in inactive_mask_list:
+                    if len(inactive_mask) == 0:
+                        continue
+                    #FIXME - 你这里根本没把subeset发到cuda上。。
+                    out = render_subset(inactive_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                    cached_renders.append(out["render"])
+                    cached_depths.append(out["depth"])
+                    cached_alphas.append(out["alphaLeft"])
+                    cached_viewspace_points.append(out["viewspace_points"])
+                    cache_visibility_filter.append(out["visibility_filter"])
+                    cache_radii.append(out["radii"])
+                    print("subset", inactive_mask.shape, 
+                            "render", out["render"].shape,
+                            "depth", out["depth"].shape,
+                            "alpha", out["alphaLeft"].shape,
+                            "vsp", out["viewspace_points"].shape,
+                            "vis", out["visibility_filter"].shape,
+                            "radii", out["radii"].shape)
+
+            # -------------------------------------------
+            # 2. set active block require_grad
+            # -------------------------------------------
+            N = gaussians.get_xyz.shape[0]  # 全部 Gaussian 个数
+            active_mask = torch.as_tensor(active_mask, dtype=torch.long, device=gaussians._xyz.device)
+
+
+            full_mask = torch.zeros(N, dtype=torch.bool, device=gaussians._xyz.device)
+            full_mask[active_mask] = True    
+            gaussians.set_requires_grad_by_mask(full_mask, True)
+            gaussians.set_requires_grad_by_masks(~full_mask, False)
         
-        xyz, block_masks = generate_block_masks(gaussians._xyz, max_size = 500_000)
+            out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            
+            # -------- merge cached + active --------
+            final_rgb, bg_rgb, final_depth, viewspace_point_tensor, visibility_filter, radii = merge(
+                cached_renders + [out["render"]],
+                cached_depths  + [out["depth"]],
+                cached_alphas  + [out["alphaLeft"]],
+                cached_viewspace_points + [out["viewspace_points"]],
+                cache_visibility_filter + [out["visibility_filter"]],
+                cache_radii + [out["radii"]],
+            )
+            final_rgb = final_rgb.clamp(0, 1)
+            image = final_rgb
+            if viewpoint_cam.alpha_mask is not None:
+                alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
+                image *= alpha_mask
 
-        # TODO
-        # Step1. 拆分出N个子高斯Model 分别渲染 拼出一个完整的结果
-        # Step2. 再遍历一遍, 把每个高斯Model送上GPU, 然后反向传播更新它
-        # Step3. 把所有反向传播更新过的高斯属性copy到母高斯上
-        # Step4. 更新exposure(即使梯度是累计的也没关系,因为每个子高斯Model之间没有重叠高斯)
-        
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-        
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            Ll1 = l1_loss(image, gt_image)
+            if FUSED_SSIM_AVAILABLE:
+                ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+            else:
+                ssim_value = ssim(image, gt_image)
 
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        if FUSED_SSIM_AVAILABLE:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        else:
-            ssim_value = ssim(image, gt_image)
+            # Depth regularization
+            Ll1depth_pure = 0.0
+            if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+                invDepth = final_depth # 这里需要全局depth
+                mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+                depth_mask = viewpoint_cam.depth_mask.cuda()
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+                Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+                loss += Ll1depth
+                Ll1depth = Ll1depth.item()
+            else:
+                Ll1depth = 0
+                
+            #-------- backward -------
+            gaussians.optimizer.zero_grad()
+            loss.backward()
+            gaussians.optimizer.step()
+            gaussians.update_learning_rate(iteration)
+            iter_end.record()
 
-        # Depth regularization
-        Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-            depth_mask = viewpoint_cam.depth_mask.cuda()
-
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
-        else:
-            Ll1depth = 0
-
-        loss.backward()
-
-        iter_end.record()
 
         with torch.no_grad():
             # Progress bar
@@ -259,7 +320,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 psnr_test = 0.0
                 for idx, viewpoint in enumerate(config['cameras']):
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to(device), 0.0, 1.0)
                     if train_test_exp:
                         image = image[..., image.shape[-1] // 2:]
                         gt_image = gt_image[..., gt_image.shape[-1] // 2:]
