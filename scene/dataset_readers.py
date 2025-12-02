@@ -23,7 +23,7 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 from tqdm import tqdm
-import config
+import debug_config
 class CameraInfo(NamedTuple):
     uid: int
     R: np.array
@@ -145,7 +145,7 @@ def storePly(path, xyz, rgb):
 
 
 def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
-    import config
+    import debug_config
 
     # -----------------------
     # 读取相机外参和内参
@@ -166,8 +166,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     # -----------------------
     # DEBUG MODE : 限制相机数量
     # -----------------------
-    if config.DEBUG_MODE:
-        LIMIT = config.DATASIZE_LIMIT
+    if debug_config.DEBUG:
+        LIMIT = debug_config.DATASIZE_LIMIT
         print(f"[DEBUG] DEBUG_MODE=True → limiting extrinsics to first {LIMIT} cameras")
 
         sorted_ids = sorted(cam_extrinsics.keys())
@@ -241,8 +241,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     )
 
     # DEBUG：进一步限制数量（保险）
-    if config.DEBUG_MODE and len(cam_infos_unsorted) > config.DATASIZE_LIMIT:
-        cam_infos_unsorted = cam_infos_unsorted[:config.DATASIZE_LIMIT]
+    if debug_config.DEBUG and len(cam_infos_unsorted) > debug_config.DATASIZE_LIMIT:
+        cam_infos_unsorted = cam_infos_unsorted[:debug_config.DATASIZE_LIMIT]
 
     # -----------------------
     # 相机排序（加 bar）

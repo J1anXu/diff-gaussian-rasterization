@@ -23,7 +23,7 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 from scene_p.gaussian_model import GaussianModel as GaussianModel_p
-import config
+import debug_config
 from utils.system_utils import searchForMaxIteration
 from partition.partition import generate_block_masks
 try:
@@ -31,7 +31,7 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
-DEBUG = False
+import debug_config
 import torch
 
 
@@ -139,7 +139,7 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
             depth_list.append(depth.cpu())
             alphaLeft_list.append(alphaLeft.cpu())
             
-            if DEBUG:
+            if debug_config.DEBUG:
                 torchvision.utils.save_image(rendered, os.path.join(debug_path, 'view_{0:05d}_block_{1:03d}_render.png'.format(idx, block_idx)))
                 
         blockwise_composited, bg_rgb = merge(render_list, depth_list, alphaLeft_list)
@@ -154,7 +154,7 @@ def render_set(model_path, name, iteration, views, gaussians_list, pipeline, bac
             gt = gt[..., gt.shape[-1] // 2:]
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
 
-        if DEBUG:
+        if debug_config.DEBUG:
             directly_blending = None
             for rendered, depth_image, alphaLeft in zip(render_list, depth_list, alphaLeft_list):
                 if directly_blending is None:
