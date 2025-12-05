@@ -47,6 +47,8 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -56,7 +58,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    gaussians.training_setup_for_part(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -129,12 +131,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # -------------------------------------------
             # 1. cache inactive blocks (no grad)
             # -------------------------------------------
-            cached_renders = []
-            cached_depths  = []
-            cached_alphas  = []
-            cached_viewspace_points = []
-            cache_visibility_filter = []
-            cache_radii = []
+            inactive_blocks_renders = []
+            inactive_blocks_depths  = []
+            inactive_blocks_alphas  = []
+            inactive_blocks_viewspace_points = []
+            inactive_blocks_visibility_filter = []
+            inactive_blocks_radii = []
             count = 0
             with torch.no_grad():
                 for inactive_mask in inactive_mask_list:
@@ -147,12 +149,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image(img, save_path)
                     count += 1
                     
-                    cached_renders.append(out["render"].detach().cpu())
-                    cached_depths.append(out["depth"].detach().cpu())
-                    cached_alphas.append(out["alphaLeft"].detach().cpu())
-                    cached_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                    cache_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                    cache_radii.append(out["radii"].detach().cpu())
+                    inactive_blocks_renders.append(out["render"].detach().cpu())
+                    inactive_blocks_depths.append(out["depth"].detach().cpu())
+                    inactive_blocks_alphas.append(out["alphaLeft"].detach().cpu())
+                    inactive_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                    inactive_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                    inactive_blocks_radii.append(out["radii"].detach().cpu())
                     print("subset", inactive_mask.shape)
 
             # -------------------------------------------
@@ -167,15 +169,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.set_requires_grad_by_mask(full_mask, True)        
             active_block_out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
+            
+            #
             # -------- merge cached + active --------
             final_rgb, bg_rgb, final_depth, viewspace_point_tensor, visibility_filter, radii = merge(
-                cached_renders + [active_block_out["render"]],
-                cached_depths  + [active_block_out["depth"]],
-                cached_alphas  + [active_block_out["alphaLeft"]],
-                cached_viewspace_points + [active_block_out["viewspace_points"]],
-                cache_visibility_filter + [active_block_out["visibility_filter"]],
-                cache_radii + [active_block_out["radii"]],
+                inactive_blocks_renders + [active_block_out["render"].detach().cpu()],
+                inactive_blocks_depths  + [active_block_out["depth"].detach().cpu()],
+                inactive_blocks_alphas  + [active_block_out["alphaLeft"].detach().cpu()],
+                inactive_blocks_viewspace_points + [active_block_out["viewspace_points"].detach().cpu()],
+                inactive_blocks_visibility_filter + [active_block_out["visibility_filter"].detach().cpu()],
+                inactive_blocks_radii + [active_block_out["radii"].detach().cpu()],
             )
+            
             final_rgb = final_rgb.clamp(0, 1)
             image = final_rgb
             if viewpoint_cam.alpha_mask is not None:
@@ -183,7 +188,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 image *= alpha_mask
 
             # Loss
+            #TODO 这里的GT应该是GT减去
             gt_image = viewpoint_cam.original_image.cuda()
+            
+            
             Ll1 = l1_loss(image, gt_image)
             if FUSED_SSIM_AVAILABLE:
                 ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
@@ -207,9 +215,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 Ll1depth = 0
                 
             #-------- backward -------
-            gaussians.optimizer.zero_grad()
+            gaussians.optimizer.zero_grad() 
             loss.backward()
-            gaussians.optimizer.step()
+            gaussians.copy_grad_to_cpu(active_mask) 
+            gaussians.free_subset()   
+            gaussians.optimizer.step() 
+
+            # ---------------------------
+            # End of block-wise training
+            # ---------------------------
             gaussians.update_learning_rate(iteration)
             iter_end.record()
             gaussians.set_requires_grad_by_mask(full_mask, False)        
