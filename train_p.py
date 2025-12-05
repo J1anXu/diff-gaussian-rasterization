@@ -140,7 +140,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 for inactive_mask in inactive_mask_list:
                     if len(inactive_mask) == 0:
                         continue
-                    #FIXME - 你这里根本没把subeset发到cuda上。。
                     out = render_subset(inactive_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
                     img = out["render"].detach().cpu()
                     # 保存到本地
@@ -154,13 +153,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     cached_viewspace_points.append(out["viewspace_points"].detach().cpu())
                     cache_visibility_filter.append(out["visibility_filter"].detach().cpu())
                     cache_radii.append(out["radii"].detach().cpu())
-                    print("subset", inactive_mask.shape, 
-                            "render", out["render"].shape,
-                            "depth", out["depth"].shape,
-                            "alpha", out["alphaLeft"].shape,
-                            "vsp", out["viewspace_points"].shape,
-                            "vis", out["visibility_filter"].shape,
-                            "radii", out["radii"].shape)
+                    print("subset", inactive_mask.shape)
 
             # -------------------------------------------
             # 2. set active block require_grad
