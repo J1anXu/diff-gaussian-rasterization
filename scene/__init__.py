@@ -17,7 +17,7 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
-
+import config
 class Scene:
 
     gaussians : GaussianModel
@@ -81,6 +81,13 @@ class Scene:
                                                            "point_cloud.ply"), args.train_test_exp)
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, scene_info.train_cameras, self.cameras_extent)
+            
+        if config.DEBUG_MODE:
+            # 先让create_from_pcd创建,然后再去加载点云,避免一些参数是空的啊
+            self.gaussians.load_ply(os.path.join(self.model_path,
+                                                "point_cloud",
+                                                "iteration_" + str(30000),
+                                                "point_cloud.ply"), args.train_test_exp)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

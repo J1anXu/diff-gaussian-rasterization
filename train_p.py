@@ -108,7 +108,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # split into blocks (only when densified)
         # --------------------------
         if iteration == first_iter or just_densified:
-            block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 10_000)
+            block_masks, _ = generate_block_masks(gaussians._xyz, max_size = 500_000)
             block_masks = [m for m in block_masks if len(m) > 0]
 
             just_densified = False
@@ -126,9 +126,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 for i in range(K)
                 if i != block_id and len(block_masks[i]) > 0
             ]
-
-
-            
             # -------------------------------------------
             # 1. cache inactive blocks (no grad)
             # -------------------------------------------
@@ -151,12 +148,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image(img, save_path)
                     count += 1
                     
-                    cached_renders.append(out["render"])
-                    cached_depths.append(out["depth"])
-                    cached_alphas.append(out["alphaLeft"])
-                    cached_viewspace_points.append(out["viewspace_points"])
-                    cache_visibility_filter.append(out["visibility_filter"])
-                    cache_radii.append(out["radii"])
+                    cached_renders.append(out["render"].detach().cpu())
+                    cached_depths.append(out["depth"].detach().cpu())
+                    cached_alphas.append(out["alphaLeft"].detach().cpu())
+                    cached_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                    cache_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                    cache_radii.append(out["radii"].detach().cpu())
                     print("subset", inactive_mask.shape, 
                             "render", out["render"].shape,
                             "depth", out["depth"].shape,
@@ -174,19 +171,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             full_mask = torch.zeros(N, dtype=torch.bool, device=gaussians._xyz.device)
             full_mask[active_mask] = True    
-            gaussians.set_requires_grad_by_mask(full_mask, True)
-            gaussians.set_requires_grad_by_masks(~full_mask, False)
-        
-            out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            gaussians.set_requires_grad_by_mask(full_mask, True)        
+            active_block_out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
             # -------- merge cached + active --------
             final_rgb, bg_rgb, final_depth, viewspace_point_tensor, visibility_filter, radii = merge(
-                cached_renders + [out["render"]],
-                cached_depths  + [out["depth"]],
-                cached_alphas  + [out["alphaLeft"]],
-                cached_viewspace_points + [out["viewspace_points"]],
-                cache_visibility_filter + [out["visibility_filter"]],
-                cache_radii + [out["radii"]],
+                cached_renders + [active_block_out["render"]],
+                cached_depths  + [active_block_out["depth"]],
+                cached_alphas  + [active_block_out["alphaLeft"]],
+                cached_viewspace_points + [active_block_out["viewspace_points"]],
+                cache_visibility_filter + [active_block_out["visibility_filter"]],
+                cache_radii + [active_block_out["radii"]],
             )
             final_rgb = final_rgb.clamp(0, 1)
             image = final_rgb
@@ -224,6 +219,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.optimizer.step()
             gaussians.update_learning_rate(iteration)
             iter_end.record()
+            gaussians.set_requires_grad_by_mask(full_mask, False)        
 
 
         with torch.no_grad():
