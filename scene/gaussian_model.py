@@ -93,21 +93,29 @@ class GaussianModel:
     # =============================
     #  Subset control API
     # =============================
-    def start_subset(self, subset_indices):
+    def start_subset(self, subset_indices, requires_grad=False):
         self.subset_mode = True
 
-        # 1. subset index 保存在 CPU
+        # subset index 保存在 CPU
         idx = self._to_cpu_index(subset_indices)
         self.subset_indices = idx
 
-        # 2. 从 CPU master 参数选当前 block 的数据
-        # 然后拷贝到 GPU（只拷子集）
-        self._xyz_gpu           = self._xyz[idx].cuda(non_blocking=True)
-        self._opacity_gpu       = self._opacity[idx].cuda(non_blocking=True)
-        self._scaling_gpu       = self._scaling[idx].cuda(non_blocking=True)
-        self._rotation_gpu      = self._rotation[idx].cuda(non_blocking=True)
-        self._features_dc_gpu   = self._features_dc[idx].cuda(non_blocking=True)
-        self._features_rest_gpu = self._features_rest[idx].cuda(non_blocking=True)
+        # 封装一个 helper：把 CPU subset 拷到 GPU，并根据是否需要梯度决定 requires_grad
+        def _to_gpu(tensor):
+            t = tensor[idx].cuda(non_blocking=True)
+            if requires_grad:
+                return t.detach().requires_grad_(True)
+            else:
+                return t.detach()  # 不需要 grad 的 subset，全程断开 autograd
+        
+        # 根据是否需要梯度选择创建 GPU 子集
+        self._xyz_gpu           = _to_gpu(self._xyz)
+        self._opacity_gpu       = _to_gpu(self._opacity)
+        self._scaling_gpu       = _to_gpu(self._scaling)
+        self._rotation_gpu      = _to_gpu(self._rotation)
+        self._features_dc_gpu   = _to_gpu(self._features_dc)
+        self._features_rest_gpu = _to_gpu(self._features_rest)
+
 
         
     def end_subset(self):
@@ -128,6 +136,10 @@ class GaussianModel:
         self._rotation_gpu = None
         self._features_dc_gpu = None
         self._features_rest_gpu = None
+        
+        # 强制释放 GPU memory
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
   
     def copy_grad_to_cpu(self, mask):
         """
@@ -156,31 +168,6 @@ class GaussianModel:
         self._rotation.grad[mask] = self._rotation_gpu.grad.detach().cpu()
         self._features_dc.grad[mask] = self._features_dc_gpu.grad.detach().cpu()
         self._features_rest.grad[mask] = self._features_rest_gpu.grad.detach().cpu()
-
-    def free_subset(self):
-        """
-        完全释放 GPU subset 参数，切断 autograd graph，释放 GPU 显存
-        """
-
-        # Delete GPU tensors so they no longer hold GPU memory
-        del self._xyz_gpu
-        del self._opacity_gpu
-        del self._scaling_gpu
-        del self._rotation_gpu
-        del self._features_dc_gpu
-        del self._features_rest_gpu
-
-        self._xyz_gpu = None
-        self._opacity_gpu = None
-        self._scaling_gpu = None
-        self._rotation_gpu = None
-        self._features_dc_gpu = None
-        self._features_rest_gpu = None
-
-        # 强制释放 GPU memory
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        
         
     def capture(self):
         return (
@@ -671,41 +658,3 @@ class GaussianModel:
 
 
 
-    def set_requires_grad_by_mask(self, indices, flag: bool):
-        """
-        Only set requires_grad for selected Gaussians (subset).
-        indices: list or tensor of valid Gaussian indices
-        flag: True/False
-        """
-        idx = torch.as_tensor(indices, dtype=torch.long, device=self._xyz.device)
-
-        # XYZ
-        self._xyz.requires_grad_(False)
-        self._xyz[idx].requires_grad = flag
-
-        # scaling
-        self._scaling.requires_grad_(False)
-        self._scaling[idx].requires_grad = flag
-
-        # rotation
-        self._rotation.requires_grad_(False)
-        self._rotation[idx].requires_grad = flag
-
-        # opacity
-        self._opacity.requires_grad_(False)
-        self._opacity[idx].requires_grad = flag
-
-        # SH features: shape [S, N, C]
-        self._features_dc.requires_grad_(False)
-        self._features_dc[idx, :, :].requires_grad = flag
-
-        self._features_rest.requires_grad_(False)
-        self._features_rest[idx, :, :].requires_grad = flag
-
-    def set_requires_grad_by_masks(self, mask_list, flag: bool):
-        """
-        Apply set_requires_grad_by_mask for multiple masks.
-        mask_list: list of list/tensors of indices
-        """
-        for m in mask_list:
-            self.set_requires_grad_by_mask(m, flag)

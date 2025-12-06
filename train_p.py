@@ -47,6 +47,25 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
+def check_update(cpu_param_before, cpu_param_after, mask):
+    mask = mask.to("cpu")
+
+    # 1) 取出 mask 对应的 slice
+    before_slice = cpu_param_before[mask]
+    after_slice  = cpu_param_after[mask]
+
+    diff_mask = (after_slice - before_slice).abs().sum().item()
+
+    # 2) 取出非-mask 部分
+    all_idx = torch.arange(cpu_param_before.shape[0])
+    other_idx = all_idx[~torch.isin(all_idx, mask)]
+    before_other = cpu_param_before[other_idx]
+    after_other  = cpu_param_after[other_idx]
+
+    diff_other = (after_other - before_other).abs().sum().item()
+
+    print(f"[MASK   UPDATED] diff = {diff_mask:.8f}")
+    print(f"[OTHERS STATIC] diff = {diff_other:.8f}")
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
@@ -119,29 +138,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         K = len(block_masks)
         
     
-        # -------------------------------------------
-        # 1. cache inactive blocks (no grad)
-        # -------------------------------------------
+
         all_blocks_renders = []
         all_blocks_depths  = []
         all_blocks_alphas  = []
         all_blocks_viewspace_points = []
         all_blocks_visibility_filter = []
         all_blocks_radii = []
-        
+
+        # 渲染全部结果 不带梯度
         with torch.no_grad():
             count = 0
             for mask in block_masks:
                 if len(mask) == 0:
                     continue
-                out = render_subset(mask, viewpoint_cam, gaussians, pipe, bg,
-                                    use_trained_exp=dataset.train_test_exp,
-                                    separate_sh=SPARSE_ADAM_AVAILABLE)
+                
+                # 开启subset会导致高斯只能被访问到mask指定的部分(get()函数被mask限制) 所以渲染结果也就只包含这些高斯产生的RGB
+                gaussians.start_subset(mask)
+                out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+                gaussians.end_subset()
+                
                 img = out["render"].detach().cpu()
                 save_path = f"debug/block_{count}.png"
                 torchvision.utils.save_image(img, save_path)
                 count += 1
 
+                # 存储所有信息
                 all_blocks_renders.append(out["render"].detach().cpu())
                 all_blocks_depths.append(out["depth"].detach().cpu())
                 all_blocks_alphas.append(out["alphaLeft"].detach().cpu())
@@ -160,8 +182,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 available_block_indices.append(idx)
 
-        # 先把这些东西在CPU上合并了, 不要传到GPU里去合并
-        _, _, _, viewspace_point_tensor, visibility_filter, radii = merge(
+        # 先把这些东西在CPU上合并了, 不要传到GPU里去合并, 后续更新光照信息有用
+        rgb_cpu, depth_cpu, alpha_cpu, viewspace_point_tensor_cpu, visibility_filter_cpu, radii_cpu = merge(
                 all_blocks_renders,
                 all_blocks_depths,
                 all_blocks_alphas,
@@ -173,7 +195,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         gt_image = viewpoint_cam.original_image.cuda()
         GPU = "cuda"
-        CPU = "cpu"
 
         # 遍历所有block 轮流当active block
         for block_id in available_block_indices:
@@ -181,18 +202,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             print(f"Iteration {iteration}, Curr act block = {block_id}")
             active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
 
-            N = gaussians.get_xyz.shape[0]  # 全部 Gaussian 个数
-            full_mask = torch.zeros(N, dtype=torch.bool, device=gaussians._xyz.device)
-            full_mask[active_mask] = True    
-     
-            # 1. 打开当前 block 对应高斯的梯度
-            gaussians.set_requires_grad_by_mask(full_mask, True)
-            gaussians.start_subset(active_mask)
+            # 1. 打开subset模式 使GPU只能看到指定的高斯, 并且开启这部分高斯的梯度
+            gaussians.start_subset(active_mask, requires_grad=True) 
             
-            # 2. 用带梯度的参数重新渲染 active block
-            active_block_out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
+            # 3. 渲染指定部分的高斯
+            active_block_out = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
-            # 3. 把其余非纯黑 blocks 从 CPU 搬到 GPU（不需要梯度）
+            # 4. 把其余非纯黑 blocks 从 CPU 搬到 GPU（不需要梯度）但是要参与最终的 merge 
             rgb_list   = []
             depth_list = []
             alpha_list = []
@@ -254,15 +270,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 6. backward，梯度只会流向 active block 对应的 subset 参数
             gaussians.optimizer.zero_grad() 
             loss.backward()
-            gaussians.copy_grad_to_cpu(active_mask) 
-            gaussians.free_subset()   
+            
+            # 7. 把梯度从GPU搬回CPU
+            gaussians.copy_grad_to_cpu(active_mask)
+                        
+            # 8. 关闭subset模式 清空GPU
+            gaussians.end_subset() 
+            
+            xyz_before = gaussians._xyz.clone().detach()
+            opacity_before = gaussians._opacity.clone().detach()
+            
+            
+            # 9. 更新参数
             gaussians.optimizer.step() 
+            
+            
+            xyz_after = gaussians._xyz.clone().detach()
+            opacity_after = gaussians._opacity.clone().detach()
 
-            # ---------------------------
-            # End of block-wise training
-            # ---------------------------
+            check_update(xyz_before, xyz_after, active_mask)
+            
+            
+            # TODO 更新曝光
+            #gaussians.exposure_optimizer.step()
+            
+            # 11. 更新学习率
             gaussians.update_learning_rate(iteration)
-            gaussians.set_requires_grad_by_mask(full_mask, False)        
+            
             iter_end.record()
 
         with torch.no_grad():
