@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, render_subset, merge, network_gui
+from gaussian_renderer import render, render_subset, merge, merge2, network_gui
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state, get_expon_lr_func
@@ -117,81 +117,118 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
         K = len(block_masks)
-        # ==========================
-        #        外循环：block-wise
-        # ==========================
-        for block_id in range(K):
+        
+    
+        # -------------------------------------------
+        # 1. cache inactive blocks (no grad)
+        # -------------------------------------------
+        all_blocks_renders = []
+        all_blocks_depths  = []
+        all_blocks_alphas  = []
+        all_blocks_viewspace_points = []
+        all_blocks_visibility_filter = []
+        all_blocks_radii = []
+        
+        with torch.no_grad():
+            count = 0
+            for mask in block_masks:
+                if len(mask) == 0:
+                    continue
+                out = render_subset(mask, viewpoint_cam, gaussians, pipe, bg,
+                                    use_trained_exp=dataset.train_test_exp,
+                                    separate_sh=SPARSE_ADAM_AVAILABLE)
+                img = out["render"].detach().cpu()
+                save_path = f"debug/block_{count}.png"
+                torchvision.utils.save_image(img, save_path)
+                count += 1
+
+                all_blocks_renders.append(out["render"].detach().cpu())
+                all_blocks_depths.append(out["depth"].detach().cpu())
+                all_blocks_alphas.append(out["alphaLeft"].detach().cpu())
+                all_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
+                all_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
+                all_blocks_radii.append(out["radii"].detach().cpu())
+                print("subset", mask.shape)
+        
+        # contribution_lists
+        black_block_indices = []
+        available_block_indices = []
+        for idx, r in enumerate(all_blocks_renders):
+            # r 是 CPU tensor: [3,H,W]
+            if r.abs().sum().item() == 0:  # 全黑
+                black_block_indices.append(idx)
+            else:
+                available_block_indices.append(idx)
+
+        # 先把这些东西在CPU上合并了, 不要传到GPU里去合并
+        _, _, _, viewspace_point_tensor, visibility_filter, radii = merge(
+                all_blocks_renders,
+                all_blocks_depths,
+                all_blocks_alphas,
+                all_blocks_viewspace_points,
+                all_blocks_visibility_filter,
+                all_blocks_radii,
+        )
+
+
+        gt_image = viewpoint_cam.original_image.cuda()
+        GPU = "cuda"
+        CPU = "cpu"
+
+        # 遍历所有block 轮流当active block
+        for block_id in available_block_indices:
+            
+            print(f"Iteration {iteration}, Curr act block = {block_id}")
             active_mask = torch.as_tensor(block_masks[block_id], dtype=torch.long, device=gaussians._xyz.device)
 
-            inactive_mask_list = [
-                torch.as_tensor(block_masks[i], dtype=torch.long, device=gaussians._xyz.device)
-                for i in range(K)
-                if i != block_id and len(block_masks[i]) > 0
-            ]
-            # -------------------------------------------
-            # 1. cache inactive blocks (no grad)
-            # -------------------------------------------
-            inactive_blocks_renders = []
-            inactive_blocks_depths  = []
-            inactive_blocks_alphas  = []
-            inactive_blocks_viewspace_points = []
-            inactive_blocks_visibility_filter = []
-            inactive_blocks_radii = []
-            count = 0
-            with torch.no_grad():
-                for inactive_mask in inactive_mask_list:
-                    if len(inactive_mask) == 0:
-                        continue
-                    out = render_subset(inactive_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
-                    img = out["render"].detach().cpu()
-                    # 保存到本地
-                    save_path = f"debug/block_{count}.png"
-                    torchvision.utils.save_image(img, save_path)
-                    count += 1
-                    
-                    inactive_blocks_renders.append(out["render"].detach().cpu())
-                    inactive_blocks_depths.append(out["depth"].detach().cpu())
-                    inactive_blocks_alphas.append(out["alphaLeft"].detach().cpu())
-                    inactive_blocks_viewspace_points.append(out["viewspace_points"].detach().cpu())
-                    inactive_blocks_visibility_filter.append(out["visibility_filter"].detach().cpu())
-                    inactive_blocks_radii.append(out["radii"].detach().cpu())
-                    print("subset", inactive_mask.shape)
-
-            # -------------------------------------------
-            # 2. set active block require_grad
-            # -------------------------------------------
             N = gaussians.get_xyz.shape[0]  # 全部 Gaussian 个数
-            active_mask = torch.as_tensor(active_mask, dtype=torch.long, device=gaussians._xyz.device)
-
-
             full_mask = torch.zeros(N, dtype=torch.bool, device=gaussians._xyz.device)
             full_mask[active_mask] = True    
-            gaussians.set_requires_grad_by_mask(full_mask, True)        
+     
+            # 1. 打开当前 block 对应高斯的梯度
+            gaussians.set_requires_grad_by_mask(full_mask, True)
+            gaussians.start_subset(active_mask)
+            
+            # 2. 用带梯度的参数重新渲染 active block
             active_block_out = render_subset(active_mask, viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
             
+            # 3. 把其余非纯黑 blocks 从 CPU 搬到 GPU（不需要梯度）
+            rgb_list   = []
+            depth_list = []
+            alpha_list = []
+            vps_list   = []
+            vis_list   = []
+            radii_list = []
             
-            #
-            # -------- merge cached + active --------
-            final_rgb, bg_rgb, final_depth, viewspace_point_tensor, visibility_filter, radii = merge(
-                inactive_blocks_renders + [active_block_out["render"].detach().cpu()],
-                inactive_blocks_depths  + [active_block_out["depth"].detach().cpu()],
-                inactive_blocks_alphas  + [active_block_out["alphaLeft"].detach().cpu()],
-                inactive_blocks_viewspace_points + [active_block_out["viewspace_points"].detach().cpu()],
-                inactive_blocks_visibility_filter + [active_block_out["visibility_filter"].detach().cpu()],
-                inactive_blocks_radii + [active_block_out["radii"].detach().cpu()],
-            )
+            for idx in available_block_indices:
+                if idx == block_id:
+                    # 当前 active block：用刚刚重新渲染的版本 (带梯度)
+                    rgb_list.append(active_block_out["render"])
+                    depth_list.append(active_block_out["depth"])
+                    alpha_list.append(active_block_out["alphaLeft"])
+                    vps_list.append(active_block_out["viewspace_points"])
+                    vis_list.append(active_block_out["visibility_filter"])
+                    radii_list.append(active_block_out["radii"])
+                else:
+                    # 其他 block：用 cache 的 CPU 结果搬到 GPU，默认 requires_grad=False
+                    rgb_list.append(all_blocks_renders[idx].to(GPU))
+                    depth_list.append(all_blocks_depths[idx].to(GPU))
+                    alpha_list.append(all_blocks_alphas[idx].to(GPU))
+                    
+                    vps_list.append(all_blocks_viewspace_points[idx].to(GPU))
+                    vis_list.append(all_blocks_visibility_filter[idx].to(GPU))    # 一般是 index / long
+                    radii_list.append(all_blocks_radii[idx].to(GPU))
             
-            final_rgb = final_rgb.clamp(0, 1)
+            
+            # 4. 在当前 active block 的图上进行一次 merge（这次 merge 有梯度链）
+            final_rgb, bg_rgb, final_depth = merge2(rgb_list, depth_list, alpha_list)
+
             image = final_rgb
             if viewpoint_cam.alpha_mask is not None:
                 alpha_mask = viewpoint_cam.alpha_mask.to(image.device)
                 image *= alpha_mask
-
-            # Loss
-            #TODO 这里的GT应该是GT减去
-            gt_image = viewpoint_cam.original_image.cuda()
             
-            
+            # 5. 计算 loss（依赖于 active_out → 依赖于当前 subset 的高斯）
             Ll1 = l1_loss(image, gt_image)
             if FUSED_SSIM_AVAILABLE:
                 ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
@@ -214,7 +251,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             else:
                 Ll1depth = 0
                 
-            #-------- backward -------
+            # 6. backward，梯度只会流向 active block 对应的 subset 参数
             gaussians.optimizer.zero_grad() 
             loss.backward()
             gaussians.copy_grad_to_cpu(active_mask) 
@@ -225,9 +262,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # End of block-wise training
             # ---------------------------
             gaussians.update_learning_rate(iteration)
-            iter_end.record()
             gaussians.set_requires_grad_by_mask(full_mask, False)        
-
+            iter_end.record()
 
         with torch.no_grad():
             # Progress bar
