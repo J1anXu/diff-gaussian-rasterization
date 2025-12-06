@@ -277,24 +277,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # 8. 关闭subset模式 清空GPU
             gaussians.end_subset() 
             
-            xyz_before = gaussians._xyz.clone().detach()
-            opacity_before = gaussians._opacity.clone().detach()
+            # xyz_before = gaussians._xyz.clone().detach()
+            # opacity_before = gaussians._opacity.clone().detach()
             
             
             # 9. 更新参数
             gaussians.optimizer.step() 
             
             
-            xyz_after = gaussians._xyz.clone().detach()
-            opacity_after = gaussians._opacity.clone().detach()
+            # xyz_after = gaussians._xyz.clone().detach()
+            # opacity_after = gaussians._opacity.clone().detach()
 
-            check_update(xyz_before, xyz_after, active_mask)
-            
-            
-            # TODO 更新曝光
-            #gaussians.exposure_optimizer.step()
-            
-            # 11. 更新学习率
+            # check_update(xyz_before, xyz_after, active_mask)
+            # check_update(opacity_before, opacity_after, active_mask)
+
+
+            # 10. 更新学习率
             gaussians.update_learning_rate(iteration)
             
             iter_end.record()
@@ -331,26 +329,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+            # # Densification
+            # if iteration < opt.densify_until_iter:
+            #     # Keep track of max radii in image-space for pruning
+            #     gaussians.max_radii2D[visibility_filter_cpu] = torch.max(gaussians.max_radii2D[visibility_filter_cpu], radii_cpu[visibility_filter_cpu])
+            #     gaussians.add_densification_stats(viewspace_point_tensor_cpu, visibility_filter_cpu)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+            #     if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+            #         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+            #         gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii_cpu)
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+            #     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+            #         gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
                 if use_sparse_adam:
-                    visible = radii > 0
-                    gaussians.optimizer.step(visible, radii.shape[0])
+                    visible = radii_cpu > 0
+                    gaussians.optimizer.step(visible, radii_cpu.shape[0])
                     gaussians.optimizer.zero_grad(set_to_none = True)
                 else:
                     gaussians.optimizer.step()
