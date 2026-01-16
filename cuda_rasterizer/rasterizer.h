@@ -52,7 +52,7 @@ namespace CudaRasterizer
 			float* depth,
 			bool antialiasing,
 			int* radii = nullptr,
-			float* alphaLeft = nullptr,
+			float* alphaLeft = nullptr, // PART:
 			bool debug = false);
 
 		static void backward(
@@ -87,6 +87,7 @@ namespace CudaRasterizer
 			float* dL_dsh,
 			float* dL_dscale,
 			float* dL_drot,
+			const float* colors_bg, // PART
 			bool antialiasing,
 			bool debug);
 	};

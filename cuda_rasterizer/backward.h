@@ -38,7 +38,9 @@ namespace BACKWARD
 		float4* dL_dconic2D,
 		float* dL_dopacity,
 		float* dL_dcolors,
-		float* dL_dinvdepths);
+		float* dL_dinvdepths,
+		const float* colors_bg); // PART
+
 
 	void preprocess(
 		int P, int D, int M,
