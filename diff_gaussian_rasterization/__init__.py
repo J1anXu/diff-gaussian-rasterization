@@ -14,6 +14,13 @@ import torch.nn as nn
 import torch
 from . import _C
 
+_global_colors_bg = None
+
+# only one picture
+def set_colors_bg(colors_bg):
+    global _global_colors_bg
+    _global_colors_bg = colors_bg
+
 def cpu_deep_copy_tuple(input_tuple):
     copied_tensors = [item.cpu().clone() if isinstance(item, torch.Tensor) else item for item in input_tuple]
     return tuple(copied_tensors)
@@ -96,6 +103,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         colors_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, opacities, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        colors_bg = _global_colors_bg
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -120,6 +128,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 num_rendered,
                 binningBuffer,
                 imgBuffer,
+                colors_bg,
                 raster_settings.antialiasing,
                 raster_settings.debug)
 
