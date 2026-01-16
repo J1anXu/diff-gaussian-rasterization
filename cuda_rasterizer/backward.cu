@@ -730,7 +730,7 @@ void BACKWARD::render(
 	float4* dL_dconic2D,
 	float* dL_dopacity,
 	float* dL_dcolors,
-	float* dL_dinvdepths
+	float* dL_dinvdepths,
 	const float* colors_bg) // PART
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
