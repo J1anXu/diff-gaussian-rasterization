@@ -1,0 +1,15 @@
+LICENSE.md
+README.md
+conv.cu
+ext.cpp
+rasterize_points.cu
+setup.py
+cuda_rasterizer/adam.cu
+cuda_rasterizer/backward.cu
+cuda_rasterizer/forward.cu
+cuda_rasterizer/rasterizer_impl.cu
+diff_gaussian_rasterization_sparse_adam/__init__.py
+diff_gaussian_rasterization_sparse_adam.egg-info/PKG-INFO
+diff_gaussian_rasterization_sparse_adam.egg-info/SOURCES.txt
+diff_gaussian_rasterization_sparse_adam.egg-info/dependency_links.txt
+diff_gaussian_rasterization_sparse_adam.egg-info/top_level.txt
