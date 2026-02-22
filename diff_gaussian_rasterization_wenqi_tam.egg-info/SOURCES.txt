@@ -1,6 +1,7 @@
 LICENSE.md
 README.md
 conv.cu
+cpu_adam.cpp
 ext.cpp
 rasterize_points.cu
 setup.py

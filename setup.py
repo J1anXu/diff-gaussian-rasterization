@@ -27,8 +27,13 @@ setup(
             "cuda_rasterizer/adam.cu",
             "rasterize_points.cu",
             "conv.cu",
+            "cpu_adam.cpp",
             "ext.cpp"],
-            extra_compile_args={"nvcc": ["-Xcompiler", "-fno-gnu-unique","-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")]})
+            extra_compile_args={
+                "nvcc": ["-Xcompiler", "-fno-gnu-unique", "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")],
+                "cxx": ["-O3", "-fopenmp", "-std=c++17"]
+            },
+            extra_link_args=["-fopenmp"])
         ],
     cmdclass={
         'build_ext': BuildExtension
