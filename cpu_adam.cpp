@@ -650,3 +650,96 @@ void index_copy(at::Tensor src, at::Tensor indices, at::Tensor dest) {
 }
 
 
+
+// ---------------------------------------------------------------------------
+// Frustum culling  (C + OpenMP + AVX-512 via -march=native)
+// ---------------------------------------------------------------------------
+
+at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio)
+{
+    TORCH_CHECK(xyz.is_contiguous(),  "xyz must be contiguous");
+    TORCH_CHECK(M.is_contiguous(),    "M must be contiguous");
+    TORCH_CHECK(xyz.dim()==2 && xyz.size(1)==3, "xyz must be [N,3]");
+    TORCH_CHECK(M.dim()==2 && M.size(0)==4 && M.size(1)==4, "M must be [4,4]");
+    TORCH_CHECK(!xyz.is_cuda() && !M.is_cuda(), "inputs must be on CPU");
+
+    const int64_t N = xyz.size(0);
+    const float* __restrict__ p = xyz.data_ptr<float>();
+    const float* __restrict__ m = M.data_ptr<float>();
+
+    const float m00=m[0], m01=m[1], m02=m[2],  m03=m[3];
+    const float m10=m[4], m11=m[5], m12=m[6],  m13=m[7];
+    const float m20=m[8], m21=m[9], m22=m[10], m23=m[11];
+    const float b0=m[12], b1=m[13], b2=m[14],  b3=m[15];
+
+    const int NT = 16;
+    std::vector<std::vector<int64_t>> local_idx(NT);
+    for (auto& v : local_idx) v.reserve(N / NT / 2 + 64);
+
+    #pragma omp parallel num_threads(16)
+    {
+        int tid = omp_get_thread_num();
+        auto& loc = local_idx[tid];
+        #pragma omp for schedule(static)
+        for (int64_t i = 0; i < N; i++) {
+            float x0 = p[i*3+0], x1 = p[i*3+1], x2 = p[i*3+2];
+            float cx = x0*m00 + x1*m10 + x2*m20 + b0;
+            float cy = x0*m01 + x1*m11 + x2*m21 + b1;
+            float cz = x0*m02 + x1*m12 + x2*m22 + b2;
+            float cw = x0*m03 + x1*m13 + x2*m23 + b3;
+            float inf = inflate_ratio * cw;
+            float wpi = cw + inf, wmi = -cw - inf;
+            if ((cw > 0.f) & (cx >= wmi) & (cx <= wpi) &
+                (cy >= wmi) & (cy <= wpi) &
+                (cz >= 0.f) & (cz <= wpi))
+                loc.push_back(i);
+        }
+    }
+
+    int64_t total = 0;
+    for (auto& v : local_idx) total += (int64_t)v.size();
+    auto out = torch::empty({total},
+        torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+    int64_t* op = out.data_ptr<int64_t>();
+    int64_t off = 0;
+    for (auto& v : local_idx) {
+        std::memcpy(op + off, v.data(), v.size() * sizeof(int64_t));
+        off += (int64_t)v.size();
+    }
+    return out;
+}
+
+at::Tensor frustum_culling_mask(at::Tensor xyz, at::Tensor M, float inflate_ratio)
+{
+    TORCH_CHECK(xyz.is_contiguous(),  "xyz must be contiguous");
+    TORCH_CHECK(M.is_contiguous(),    "M must be contiguous");
+    TORCH_CHECK(!xyz.is_cuda() && !M.is_cuda(), "inputs must be on CPU");
+
+    const int64_t N = xyz.size(0);
+    const float* __restrict__ p = xyz.data_ptr<float>();
+    const float* __restrict__ m = M.data_ptr<float>();
+
+    const float m00=m[0], m01=m[1], m02=m[2],  m03=m[3];
+    const float m10=m[4], m11=m[5], m12=m[6],  m13=m[7];
+    const float m20=m[8], m21=m[9], m22=m[10], m23=m[11];
+    const float b0=m[12], b1=m[13], b2=m[14],  b3=m[15];
+
+    auto mask_out = torch::empty({N},
+        torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU));
+    bool* __restrict__ out = mask_out.data_ptr<bool>();
+
+    #pragma omp parallel for schedule(static) num_threads(16)
+    for (int64_t i = 0; i < N; i++) {
+        float x0 = p[i*3+0], x1 = p[i*3+1], x2 = p[i*3+2];
+        float cx = x0*m00 + x1*m10 + x2*m20 + b0;
+        float cy = x0*m01 + x1*m11 + x2*m21 + b1;
+        float cz = x0*m02 + x1*m12 + x2*m22 + b2;
+        float cw = x0*m03 + x1*m13 + x2*m23 + b3;
+        float inf = inflate_ratio * cw;
+        float wpi = cw + inf, wmi = -cw - inf;
+        out[i] = (cw > 0.f) & (cx >= wmi) & (cx <= wpi) &
+                 (cy >= wmi) & (cy <= wpi) &
+                 (cz >= 0.f) & (cz <= wpi);
+    }
+    return mask_out;
+}

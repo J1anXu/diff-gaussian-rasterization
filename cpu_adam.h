@@ -43,4 +43,12 @@ void packed_sparse_adam(
     float beta2,
     float eps);
 
+// Fused frustum culling + index gather (C+OMP, AVX-512 via -march=native).
+// xyz: [N,3] float32 contiguous CPU   M: [4,4] float32 contiguous CPU
+// Returns sorted int64 indices of points inside the frustum.
+at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio);
+
+// Bool mask version (for CUDA xyz path / render.py).
+at::Tensor frustum_culling_mask(at::Tensor xyz, at::Tensor M, float inflate_ratio);
+
 #endif
