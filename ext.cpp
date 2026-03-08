@@ -33,4 +33,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("packed_sparse_adam", &packed_sparse_adam);
   m.def("frustum_culling_idx",  &frustum_culling_idx);
   m.def("frustum_culling_mask", &frustum_culling_mask);
+  m.def("frustum_culling_gaussian_idx", &frustum_culling_gaussian_idx);
 }

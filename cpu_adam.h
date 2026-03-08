@@ -51,4 +51,12 @@ at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio
 // Bool mask version (for CUDA xyz path / render.py).
 at::Tensor frustum_culling_mask(at::Tensor xyz, at::Tensor M, float inflate_ratio);
 
+// Gaussian-extent-aware frustum culling (CPU+OMP, replicates gsplat algorithm).
+// Returns sorted int64 indices of visible Gaussians.
+at::Tensor frustum_culling_gaussian_idx(
+    at::Tensor xyz, at::Tensor quats, at::Tensor scales,
+    at::Tensor viewmat, at::Tensor K,
+    int width, int height,
+    float near_plane = 0.01f, float far_plane = 1e10f);
+
 #endif

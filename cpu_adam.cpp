@@ -764,3 +764,193 @@ at::Tensor frustum_culling_mask(at::Tensor xyz, at::Tensor M, float inflate_rati
     }
     return mask_out;
 }
+
+// ---------------------------------------------------------------------------
+// Gaussian-extent-aware frustum culling (CPU+OMP)
+// Replicates gsplat's 3-step algorithm:
+//   1. Transform mean to camera space, near/far check
+//   2. quat+scale → 3D covariance → project to 2D covariance (EWA)
+//   3. Eigenvalue-based bounding box → image overlap check
+// ---------------------------------------------------------------------------
+at::Tensor frustum_culling_gaussian_idx(
+    at::Tensor xyz,       // [N, 3] float32 contiguous CPU
+    at::Tensor quats,     // [N, 4] float32 contiguous CPU  (wxyz)
+    at::Tensor scales,    // [N, 3] float32 contiguous CPU  (already exp'd)
+    at::Tensor viewmat,   // [4, 4] float32 contiguous CPU  (row-major, col-vec convention)
+    at::Tensor K,         // [3, 3] float32 contiguous CPU
+    int width,
+    int height,
+    float near_plane,
+    float far_plane)
+{
+    TORCH_CHECK(xyz.is_contiguous()   && !xyz.is_cuda(),   "xyz must be contiguous CPU");
+    TORCH_CHECK(quats.is_contiguous() && !quats.is_cuda(), "quats must be contiguous CPU");
+    TORCH_CHECK(scales.is_contiguous()&& !scales.is_cuda(),"scales must be contiguous CPU");
+    TORCH_CHECK(viewmat.is_contiguous(), "viewmat must be contiguous");
+    TORCH_CHECK(K.is_contiguous(),       "K must be contiguous");
+
+    const int64_t N = xyz.size(0);
+    const float* __restrict__ p = xyz.data_ptr<float>();
+    const float* __restrict__ q = quats.data_ptr<float>();
+    const float* __restrict__ s = scales.data_ptr<float>();
+    const float* vm = viewmat.data_ptr<float>();
+    const float* kk = K.data_ptr<float>();
+
+    // viewmat row-major [4,4]:  row0=[R00,R01,R02,t0], etc.
+    // column-vector convention: p_cam = R * p_world + t
+    // R stored column-major for gsplat compatibility:
+    const float R00=vm[0], R01=vm[1], R02=vm[2],  tx=vm[3];
+    const float R10=vm[4], R11=vm[5], R12=vm[6],  ty=vm[7];
+    const float R20=vm[8], R21=vm[9], R22=vm[10], tz=vm[11];
+
+    const float fx=kk[0], fy=kk[4], cx_=kk[2], cy_=kk[5];
+    const float extend = 3.33f;
+
+    // Pass 1: compute mask
+    std::vector<uint8_t> mask(N);
+    uint8_t* __restrict__ mk = mask.data();
+
+    #pragma omp parallel for schedule(static) num_threads(16)
+    for (int64_t i = 0; i < N; i++) {
+        float px = p[i*3+0], py = p[i*3+1], pz = p[i*3+2];
+
+        // Step 1: world → camera
+        float cam_x = R00*px + R01*py + R02*pz + tx;
+        float cam_y = R10*px + R11*py + R12*pz + ty;
+        float cam_z = R20*px + R21*py + R22*pz + tz;
+
+        if (cam_z < near_plane || cam_z > far_plane) { mk[i] = 0; continue; }
+
+        // Step 2: quat+scale → 3D covariance → 2D covariance
+        float qw = q[i*4+0], qx = q[i*4+1], qy = q[i*4+2], qz = q[i*4+3];
+        float sx = s[i*3+0], sy = s[i*3+1], sz = s[i*3+2];
+
+        // Rotation matrix from quaternion (column-major in gsplat, we use row-major here)
+        float r00 = 1.f - 2.f*(qy*qy + qz*qz);
+        float r01 = 2.f*(qx*qy - qw*qz);
+        float r02 = 2.f*(qx*qz + qw*qy);
+        float r10 = 2.f*(qx*qy + qw*qz);
+        float r11 = 1.f - 2.f*(qx*qx + qz*qz);
+        float r12 = 2.f*(qy*qz - qw*qx);
+        float r20 = 2.f*(qx*qz - qw*qy);
+        float r21 = 2.f*(qy*qz + qw*qx);
+        float r22 = 1.f - 2.f*(qx*qx + qy*qy);
+
+        // M = R_quat * diag(s)  →  covar = M * M^T = R*S*S*R^T
+        float m00_ = r00*sx, m01_ = r01*sy, m02_ = r02*sz;
+        float m10_ = r10*sx, m11_ = r11*sy, m12_ = r12*sz;
+        float m20_ = r20*sx, m21_ = r21*sy, m22_ = r22*sz;
+
+        // covar_world = M * M^T  (symmetric 3x3)
+        float cw00 = m00_*m00_ + m01_*m01_ + m02_*m02_;
+        float cw01 = m00_*m10_ + m01_*m11_ + m02_*m12_;
+        float cw02 = m00_*m20_ + m01_*m21_ + m02_*m22_;
+        float cw11 = m10_*m10_ + m11_*m11_ + m12_*m12_;
+        float cw12 = m10_*m20_ + m11_*m21_ + m12_*m22_;
+        float cw22 = m20_*m20_ + m21_*m21_ + m22_*m22_;
+
+        // covar_cam = R_view * covar_world * R_view^T  (symmetric 3x3)
+        // tmp = R_view * covar_world  (3x3, covar is symmetric)
+        float t00 = R00*cw00 + R01*cw01 + R02*cw02;
+        float t01 = R00*cw01 + R01*cw11 + R02*cw12;
+        float t02 = R00*cw02 + R01*cw12 + R02*cw22;
+        float t10 = R10*cw00 + R11*cw01 + R12*cw02;
+        float t11 = R10*cw01 + R11*cw11 + R12*cw12;
+        float t12 = R10*cw02 + R11*cw12 + R12*cw22;
+        float t20 = R20*cw00 + R21*cw01 + R22*cw02;
+        float t21 = R20*cw01 + R21*cw11 + R22*cw12;
+        float t22 = R20*cw02 + R21*cw12 + R22*cw22;
+
+        // cc = tmp * R_view^T  (only need upper-left 3x3)
+        float cc00 = t00*R00 + t01*R01 + t02*R02;
+        float cc01 = t00*R10 + t01*R11 + t02*R12;
+        float cc02 = t00*R20 + t01*R21 + t02*R22;
+        float cc11 = t10*R10 + t11*R11 + t12*R12;
+        float cc12 = t10*R20 + t11*R21 + t12*R22;
+        float cc22 = t20*R20 + t21*R21 + t22*R22;
+
+        // Perspective projection (EWA): J * covar_cam * J^T
+        // J = [[fx/z, 0, -fx*x/z^2], [0, fy/z, -fy*y/z^2]]
+        float iz = 1.f / cam_z;
+        float iz2 = iz * iz;
+        float J00 = fx * iz, J02 = -fx * cam_x * iz2;
+        float J11 = fy * iz, J12 = -fy * cam_y * iz2;
+
+        // covar2d = J * cc * J^T  (2x2 symmetric)
+        // row0 of J*cc: [J00*cc00 + J02*cc02,  J00*cc01 + J02*cc12,  J00*cc02 + J02*cc22]
+        float jc00 = J00*cc00 + J02*cc02;
+        float jc01 = J00*cc01 + J02*cc12;
+        float jc02_v = J00*cc02 + J02*cc22;
+        // row1 of J*cc: [J11*cc01 + J12*cc02,  J11*cc11 + J12*cc12,  J11*cc12 + J12*cc22]
+        float jc10 = J11*cc01 + J12*cc02;
+        float jc11 = J11*cc11 + J12*cc12;
+        float jc12_v = J11*cc12 + J12*cc22;
+
+        // (J*cc)*J^T
+        float c2d00 = jc00*J00 + jc02_v*J02;
+        float c2d01 = jc00*0.f + jc01*J11 + jc02_v*J12;  // J^T col1 = [0, J11, J12]
+        float c2d11 = jc10*0.f + jc11*J11 + jc12_v*J12;
+
+        // add blur (eps2d = 0.3)
+        const float eps2d = 0.3f;
+        float compensation = 1.f;  // not needed for culling
+        c2d00 += eps2d;
+        c2d11 += eps2d;
+        float det = c2d00 * c2d11 - c2d01 * c2d01;
+        if (det <= 0.f) { mk[i] = 0; continue; }
+
+        // Step 3: eigenvalue-based bounding box
+        float b = 0.5f * (c2d00 + c2d11);
+        float tmp2 = sqrtf(fmaxf(0.01f, b * b - det));
+        float v1 = b + tmp2;  // larger eigenvalue
+        float r1 = extend * sqrtf(v1);
+        float radius_x = ceilf(fminf(extend * sqrtf(c2d00), r1));
+        float radius_y = ceilf(fminf(extend * sqrtf(c2d11), r1));
+
+        // Project mean to 2D
+        float mean2d_x = fx * cam_x * iz + cx_;
+        float mean2d_y = fy * cam_y * iz + cy_;
+
+        mk[i] = (uint8_t)(
+            (mean2d_x + radius_x > 0) &&
+            (mean2d_x - radius_x < width) &&
+            (mean2d_y + radius_y > 0) &&
+            (mean2d_y - radius_y < height));
+    }
+
+    // Pass 2: parallel compact
+    const int NT = 16;
+    int64_t chunk = (N + NT - 1) / NT;
+    std::vector<int64_t> thread_counts(NT, 0);
+
+    #pragma omp parallel num_threads(NT)
+    {
+        int tid = omp_get_thread_num();
+        int64_t lo = tid * chunk;
+        int64_t hi = std::min(lo + chunk, N);
+        int64_t cnt = 0;
+        for (int64_t j = lo; j < hi; j++) cnt += mk[j];
+        thread_counts[tid] = cnt;
+    }
+
+    std::vector<int64_t> offsets(NT + 1, 0);
+    for (int t = 0; t < NT; t++) offsets[t+1] = offsets[t] + thread_counts[t];
+    int64_t total = offsets[NT];
+
+    auto result = torch::empty({total},
+        torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+    int64_t* __restrict__ op = result.data_ptr<int64_t>();
+
+    #pragma omp parallel num_threads(NT)
+    {
+        int tid = omp_get_thread_num();
+        int64_t lo = tid * chunk;
+        int64_t hi = std::min(lo + chunk, N);
+        int64_t pos = offsets[tid];
+        for (int64_t j = lo; j < hi; j++) {
+            if (mk[j]) op[pos++] = j;
+        }
+    }
+
+    return result;
+}
