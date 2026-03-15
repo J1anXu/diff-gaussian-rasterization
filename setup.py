@@ -14,6 +14,14 @@ from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 import os
 os.path.dirname(os.path.abspath(__file__))
 
+# Link against LLVM libomp (from conda llvm-openmp) instead of GCC libgomp
+# to avoid two OpenMP runtimes in the same process (PyTorch uses libomp).
+# GCC -fopenmp compiles #pragma omp → GOMP_* calls; libomp has GOMP compat layer.
+import sys
+conda_lib = os.path.join(sys.prefix, 'lib')
+omp_link_args = [f"-L{conda_lib}", "-lomp", f"-Wl,-rpath,{conda_lib}",
+                 "-Wl,--no-as-needed"]
+
 setup(
     name="diff_gaussian_rasterization_wenqi_tam",
     packages=['diff_gaussian_rasterization_wenqi_tam'],
@@ -33,7 +41,7 @@ setup(
                 "nvcc": ["-Xcompiler", "-fno-gnu-unique", "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/")],
                 "cxx": ["-O3", "-fopenmp", "-std=c++17", "-march=native"]
             },
-            extra_link_args=["-fopenmp"])
+            extra_link_args=omp_link_args)
         ],
     cmdclass={
         'build_ext': BuildExtension
