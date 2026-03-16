@@ -685,13 +685,17 @@ at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio
     }
 
     // Pass 2: prefix-sum per thread chunk, then compact indices
-    const int NT = 16;
-    int64_t chunk = (N + NT - 1) / NT;
-    std::vector<int64_t> thread_counts(NT, 0);
+    const int NT_REQ = 16;
+    int NT = NT_REQ;
+    std::vector<int64_t> thread_counts(NT_REQ, 0);
 
-    #pragma omp parallel num_threads(NT)
+    #pragma omp parallel num_threads(NT_REQ)
     {
+        #pragma omp single
+        NT = omp_get_num_threads();
+
         int tid = omp_get_thread_num();
+        int64_t chunk = (N + NT - 1) / NT;
         int64_t lo = tid * chunk;
         int64_t hi = std::min(lo + chunk, N);
         int64_t cnt = 0;
@@ -700,6 +704,7 @@ at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio
     }
 
     // Compute per-thread output offsets
+    int64_t chunk = (N + NT - 1) / NT;
     std::vector<int64_t> offsets(NT + 1, 0);
     for (int t = 0; t < NT; t++) offsets[t+1] = offsets[t] + thread_counts[t];
     int64_t total = offsets[NT];
@@ -911,13 +916,17 @@ at::Tensor frustum_culling_gaussian_idx(
     }
 
     // Pass 2: parallel compact
-    const int NT = 16;
-    int64_t chunk = (N + NT - 1) / NT;
-    std::vector<int64_t> thread_counts(NT, 0);
+    const int NT_REQ = 16;
+    int NT = NT_REQ;
+    std::vector<int64_t> thread_counts(NT_REQ, 0);
 
-    #pragma omp parallel num_threads(NT)
+    #pragma omp parallel num_threads(NT_REQ)
     {
+        #pragma omp single
+        NT = omp_get_num_threads();
+
         int tid = omp_get_thread_num();
+        int64_t chunk = (N + NT - 1) / NT;
         int64_t lo = tid * chunk;
         int64_t hi = std::min(lo + chunk, N);
         int64_t cnt = 0;
@@ -925,6 +934,7 @@ at::Tensor frustum_culling_gaussian_idx(
         thread_counts[tid] = cnt;
     }
 
+    int64_t chunk = (N + NT - 1) / NT;
     std::vector<int64_t> offsets(NT + 1, 0);
     for (int t = 0; t < NT; t++) offsets[t+1] = offsets[t] + thread_counts[t];
     int64_t total = offsets[NT];
