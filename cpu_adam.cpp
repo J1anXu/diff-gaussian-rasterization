@@ -215,8 +215,7 @@ at::Tensor calculate_update_ids(at::Tensor valid_ids, at::Tensor counter, int to
     
     char *bitmap = (char*)malloc(total_num);
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int idx = 0; idx < total_num; ++idx) {
         int val = counter_ptr[idx];
         if (val == 15)
@@ -283,8 +282,7 @@ void update_counter(at::Tensor counter, at::Tensor update_ids) {
     int *update_ids_ptr = update_ids.data_ptr<int>();
     int8_t *counter_ptr = counter.data_ptr<int8_t>();
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int idx = 0; idx < total_num; ++idx) {
         counter_ptr[idx] += 1;
     }
@@ -322,8 +320,6 @@ void adam_deferred_update(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg
     float *m_ptr_base = exp_avg.data_ptr<float>();
     float *v_ptr_base = exp_avg_sq.data_ptr<float>();
     int8_t *counter_ptr = counter.data_ptr<int8_t>();
-
-    omp_set_num_threads(64);
 
     // Precomputed corrections and power values.
     float scale = beta1 / std::sqrt(beta2);
@@ -424,8 +420,7 @@ void adam_for_next_with_counter(at::Tensor weight, at::Tensor grad, at::Tensor e
         beta2_pow[i] = beta2 * beta2_pow[i-1];
     }
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int64_t idx = 0; idx < nvalid; ++idx) {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -485,8 +480,7 @@ void sparse_adam(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::Ten
     float *m_ptr_base = exp_avg.data_ptr<float>();
     float *v_ptr_base = exp_avg_sq.data_ptr<float>();
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int64_t idx = 0; idx < nvalid; ++idx) {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -539,8 +533,7 @@ void adam_for_next(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::T
     float *m_ptr_base = exp_avg.data_ptr<float>();
     float *v_ptr_base = exp_avg_sq.data_ptr<float>();
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int64_t idx = 0; idx < nvalid; ++idx) {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
@@ -596,8 +589,7 @@ void packed_sparse_adam(
     float *v_ptr = exp_avg_sq.data_ptr<float>();
     float *lr_ptr = lr_per_col.data_ptr<float>();
 
-    omp_set_num_threads(64);
-    #pragma omp parallel for
+    #pragma omp parallel for num_threads(16)
     for (int64_t vi = 0; vi < n_vis; ++vi) {
         _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
         _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
