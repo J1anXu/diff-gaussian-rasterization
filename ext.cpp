@@ -34,4 +34,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("frustum_culling_idx",  &frustum_culling_idx);
   m.def("frustum_culling_mask", &frustum_culling_mask);
   m.def("frustum_culling_gaussian_idx", &frustum_culling_gaussian_idx);
+  m.def("merge_blocks", &merge_blocks_cuda);
 }

@@ -105,3 +105,9 @@ fusedssim_backward(
     torch::Tensor &img2,
     torch::Tensor &dL_dmap
 );
+
+std::vector<torch::Tensor> merge_blocks_cuda(
+    torch::Tensor renders,
+    torch::Tensor depths,
+    torch::Tensor alphas,
+    float eps);
