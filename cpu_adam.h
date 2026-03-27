@@ -1,0 +1,62 @@
+#ifndef _CPU_ADAM_H
+#define _CPU_ADAM_H
+
+#include <torch/serialize/tensor.h>
+#include <torch/extension.h>
+#include <ATen/ATen.h>
+#include <vector>
+#include <cmath>
+
+at::Tensor quat_to_rotmat(at::Tensor& quats);
+
+std::tuple<at::Tensor, at::Tensor> persp_proj(at::Tensor& means, at::Tensor& covars, at::Tensor& Ks, int width, int height);
+
+std::tuple<torch::Tensor, torch::Tensor> world_to_cam(torch::Tensor& means, torch::Tensor& covars, torch::Tensor& viewmats);
+
+at::Tensor calculate_update_ids(at::Tensor valid_ids, at::Tensor counter, int total_num);
+
+void update_counter(at::Tensor counter, at::Tensor update_ids);
+
+void adam_deferred_update(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::Tensor exp_avg_sq, at::Tensor valid_ids, at::Tensor counter,
+    int step, float lr, float beta1, float beta2, float eps);
+
+void adam_for_next_with_counter(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::Tensor exp_avg_sq, at::Tensor valid_ids, at::Tensor weight_new, at::Tensor counter,
+    int step, float lr, float beta1, float beta2, float eps);
+
+void sparse_adam(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::Tensor exp_avg_sq, at::Tensor valid_ids,
+    int step, float lr, float beta1, float beta2, float eps);
+
+void adam_for_next(at::Tensor weight, at::Tensor grad, at::Tensor exp_avg, at::Tensor exp_avg_sq, at::Tensor valid_ids, at::Tensor weight_new,
+    int step, float lr, float beta1, float beta2, float eps);
+
+void index_copy(at::Tensor src, at::Tensor indices, at::Tensor dest);
+
+void packed_sparse_adam(
+    at::Tensor packed,
+    at::Tensor grad_subset,
+    at::Tensor exp_avg,
+    at::Tensor exp_avg_sq,
+    at::Tensor valid_ids,
+    at::Tensor lr_per_col,
+    int step,
+    float beta1,
+    float beta2,
+    float eps);
+
+// Fused frustum culling + index gather (C+OMP, AVX-512 via -march=native).
+// xyz: [N,3] float32 contiguous CPU   M: [4,4] float32 contiguous CPU
+// Returns sorted int64 indices of points inside the frustum.
+at::Tensor frustum_culling_idx(at::Tensor xyz, at::Tensor M, float inflate_ratio);
+
+// Bool mask version (for CUDA xyz path / render.py).
+at::Tensor frustum_culling_mask(at::Tensor xyz, at::Tensor M, float inflate_ratio);
+
+// Gaussian-extent-aware frustum culling (CPU+OMP, replicates gsplat algorithm).
+// Returns sorted int64 indices of visible Gaussians.
+at::Tensor frustum_culling_gaussian_idx(
+    at::Tensor xyz, at::Tensor quats, at::Tensor scales,
+    at::Tensor viewmat, at::Tensor K,
+    int width, int height,
+    float near_plane = 0.01f, float far_plane = 1e10f);
+
+#endif
