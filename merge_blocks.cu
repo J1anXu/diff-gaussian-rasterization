@@ -15,116 +15,24 @@
 #define MAX_K 16
 
 /* ------------------------------------------------------------------ */
-/* Sorting network for K elements (register-level, index + value)     */
+/* Register-level sorting for K elements                              */
 /* ------------------------------------------------------------------ */
 
-// Compare-and-swap: sort descending by depth
+// Stable descending insertion sort in registers.
+// K is small (<= 16), so this is simple, predictable, and reliable.
 __device__ __forceinline__
-void cas(float *d, int *idx, int i, int j) {
-    if (d[i] < d[j]) {            // descending: swap if d[i] < d[j]
-        float td = d[i]; d[i] = d[j]; d[j] = td;
-        int   ti = idx[i]; idx[i] = idx[j]; idx[j] = ti;
-    }
-}
-
-// Bitonic merge for a subsequence [lo, lo+cnt) — descending
-__device__ __forceinline__
-void bitonic_merge(float *d, int *idx, int lo, int cnt) {
-    for (int k = cnt >> 1; k > 0; k >>= 1) {
-        for (int j = 0; j < cnt; j++) {
-            int ij = lo + (j ^ k);
-            int ii = lo + j;
-            if (ij > ii && ij < lo + cnt)
-                cas(d, idx, ii, ij);
+void sort_desc(float *d, int *idx, int K) {
+    for (int i = 1; i < K; ++i) {
+        const float key_d = d[i];
+        const int key_idx = idx[i];
+        int j = i - 1;
+        while (j >= 0 && d[j] < key_d) {
+            d[j + 1] = d[j];
+            idx[j + 1] = idx[j];
+            --j;
         }
-    }
-}
-
-// Full bitonic sort for K elements — descending
-__device__ __forceinline__
-void bitonic_sort(float *d, int *idx, int K) {
-    for (int size = 2; size <= K; size <<= 1) {
-        for (int j = 0; j < K; j += size) {
-            int cnt = min(size, K - j);
-            bitonic_merge(d, idx, j, cnt);
-        }
-    }
-}
-
-// Optimized fixed-size sorting networks for small K
-__device__ __forceinline__
-void sort2(float *d, int *idx) {
-    cas(d, idx, 0, 1);
-}
-
-__device__ __forceinline__
-void sort3(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 0, 2); cas(d, idx, 1, 2);
-}
-
-__device__ __forceinline__
-void sort4(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 2, 3);
-    cas(d, idx, 0, 2); cas(d, idx, 1, 3);
-    cas(d, idx, 1, 2);
-}
-
-// Optimal 9-comparator network for 5 elements (descending)
-__device__ __forceinline__
-void sort5(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 3, 4);
-    cas(d, idx, 2, 4); cas(d, idx, 2, 3);
-    cas(d, idx, 0, 3); cas(d, idx, 0, 2);
-    cas(d, idx, 1, 4); cas(d, idx, 1, 3);
-    cas(d, idx, 1, 2);
-}
-
-// Optimal 12-comparator network for 6 elements
-__device__ __forceinline__
-void sort6(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 2, 3); cas(d, idx, 4, 5);
-    cas(d, idx, 0, 2); cas(d, idx, 1, 3);
-    cas(d, idx, 1, 2); cas(d, idx, 0, 4); cas(d, idx, 3, 5);
-    cas(d, idx, 2, 4); cas(d, idx, 1, 2); cas(d, idx, 3, 4);
-    cas(d, idx, 2, 3);
-}
-
-// 16-comparator network for 7 elements
-__device__ __forceinline__
-void sort7(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 2, 3); cas(d, idx, 4, 5);
-    cas(d, idx, 0, 2); cas(d, idx, 1, 3); cas(d, idx, 4, 6);
-    cas(d, idx, 1, 2); cas(d, idx, 5, 6);
-    cas(d, idx, 0, 4); cas(d, idx, 1, 5); cas(d, idx, 2, 6);
-    cas(d, idx, 1, 4); cas(d, idx, 3, 6);
-    cas(d, idx, 2, 4); cas(d, idx, 3, 5);
-    cas(d, idx, 3, 4);
-}
-
-// 19-comparator network for 8 elements (Batcher's odd-even merge)
-__device__ __forceinline__
-void sort8(float *d, int *idx) {
-    cas(d, idx, 0, 1); cas(d, idx, 2, 3); cas(d, idx, 4, 5); cas(d, idx, 6, 7);
-    cas(d, idx, 0, 2); cas(d, idx, 1, 3); cas(d, idx, 4, 6); cas(d, idx, 5, 7);
-    cas(d, idx, 1, 2); cas(d, idx, 5, 6); cas(d, idx, 0, 4); cas(d, idx, 3, 7);
-    cas(d, idx, 1, 5); cas(d, idx, 2, 6);
-    cas(d, idx, 1, 4); cas(d, idx, 3, 6);
-    cas(d, idx, 2, 4); cas(d, idx, 3, 5);
-    cas(d, idx, 3, 4);
-}
-
-__device__ __forceinline__
-void sort_dispatch(float *d, int *idx, int K) {
-    switch (K) {
-        case 1: break;
-        case 2: sort2(d, idx); break;
-        case 3: sort3(d, idx); break;
-        case 4: sort4(d, idx); break;
-        case 5: sort5(d, idx); break;
-        case 6: sort6(d, idx); break;
-        case 7: sort7(d, idx); break;
-        case 8: sort8(d, idx); break;
-        default: bitonic_sort(d, idx, K); break;
+        d[j + 1] = key_d;
+        idx[j + 1] = key_idx;
     }
 }
 
@@ -170,7 +78,7 @@ __global__ void mergeBlocksKernel(
     }
 
     // ---- 2. Sort descending by depth (far-to-near) ----
-    sort_dispatch(d, order, K);
+    sort_desc(d, order, K);
 
     // Reorder rgb and alpha by the sorted permutation
     // (need temp arrays since sort was done on d[]/order[] but r[]/a[] still in original order)
@@ -202,18 +110,38 @@ __global__ void mergeBlocksKernel(
     final_g = fminf(1.f, fmaxf(0.f, final_g));
     final_b = fminf(1.f, fmaxf(0.f, final_b));
 
-    // ---- 4. bg_rgb: leave-one-out for sorted index 0 ----
+    // ---- 4. bg_rgb: match the Python reference exactly ----
     //
-    // Composite blocks 1..K-1 as if block 0 doesn't exist.
-    // Transmittance restarts from 1.0 at block 1 (block 0's alpha excluded).
+    // Reference path:
+    //   log_front_ts = log(front_alpha_left.clamp(min=eps))
+    //   log_post_prod_inc = cumsum(log_front_ts.flip(0)).flip(0)
+    //   inv_scale = exp(-log_post_prod_inc).clamp(max=1e6)
+    //   c_scaled = front_rgbs * inv_scale
+    //   suffix_sum_c = cumsum(c_scaled.flip(0)).flip(0) - c_scaled
+    //   bg_rgb = (exp(log_post_prod_shift) * suffix_sum_c)[0]
     //
+    // Only the k=0 output is needed here, but we preserve the reference's
+    // numerical path instead of simplifying the algebra.
     float bg_r = 0.f, bg_g = 0.f, bg_b = 0.f;
-    float T_excl = 1.0f;
-    for (int k = 1; k < K; k++) {
-        bg_r += T_excl * sorted_r[k][0];
-        bg_g += T_excl * sorted_r[k][1];
-        bg_b += T_excl * sorted_r[k][2];
-        T_excl *= sorted_a[k];
+    float log_post_prod_inc[MAX_K];
+    float running_log = 0.f;
+    for (int k = K - 1; k >= 0; --k) {
+        running_log += logf(fmaxf(sorted_a[k], eps));
+        log_post_prod_inc[k] = running_log;
+    }
+
+    float suffix_scaled_r = 0.f, suffix_scaled_g = 0.f, suffix_scaled_b = 0.f;
+    for (int k = K - 1; k >= 1; --k) {
+        const float inv_scale = fminf(expf(-log_post_prod_inc[k]), 1e6f);
+        suffix_scaled_r += sorted_r[k][0] * inv_scale;
+        suffix_scaled_g += sorted_r[k][1] * inv_scale;
+        suffix_scaled_b += sorted_r[k][2] * inv_scale;
+    }
+    if (K > 1) {
+        const float scale0 = expf(log_post_prod_inc[1]);
+        bg_r = scale0 * suffix_scaled_r;
+        bg_g = scale0 * suffix_scaled_g;
+        bg_b = scale0 * suffix_scaled_b;
     }
 
     // ---- 5. Block rank (inverse permutation) ----
