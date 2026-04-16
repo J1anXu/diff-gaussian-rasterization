@@ -110,38 +110,18 @@ __global__ void mergeBlocksKernel(
     final_g = fminf(1.f, fmaxf(0.f, final_g));
     final_b = fminf(1.f, fmaxf(0.f, final_b));
 
-    // ---- 4. bg_rgb: match the Python reference exactly ----
+    // ---- 4. bg_rgb: leave-one-out for sorted index 0 ----
     //
-    // Reference path:
-    //   log_front_ts = log(front_alpha_left.clamp(min=eps))
-    //   log_post_prod_inc = cumsum(log_front_ts.flip(0)).flip(0)
-    //   inv_scale = exp(-log_post_prod_inc).clamp(max=1e6)
-    //   c_scaled = front_rgbs * inv_scale
-    //   suffix_sum_c = cumsum(c_scaled.flip(0)).flip(0) - c_scaled
-    //   bg_rgb = (exp(log_post_prod_shift) * suffix_sum_c)[0]
-    //
-    // Only the k=0 output is needed here, but we preserve the reference's
-    // numerical path instead of simplifying the algebra.
+    // This background is consumed by the modified rasterizer backward.
+    // It should represent the color behind the front-most sorted block,
+    // i.e. blocks 1..K-1 re-composited with transmittance restarted at 1.
     float bg_r = 0.f, bg_g = 0.f, bg_b = 0.f;
-    float log_post_prod_inc[MAX_K];
-    float running_log = 0.f;
-    for (int k = K - 1; k >= 0; --k) {
-        running_log += logf(fmaxf(sorted_a[k], eps));
-        log_post_prod_inc[k] = running_log;
-    }
-
-    float suffix_scaled_r = 0.f, suffix_scaled_g = 0.f, suffix_scaled_b = 0.f;
-    for (int k = K - 1; k >= 1; --k) {
-        const float inv_scale = fminf(expf(-log_post_prod_inc[k]), 1e6f);
-        suffix_scaled_r += sorted_r[k][0] * inv_scale;
-        suffix_scaled_g += sorted_r[k][1] * inv_scale;
-        suffix_scaled_b += sorted_r[k][2] * inv_scale;
-    }
-    if (K > 1) {
-        const float scale0 = expf(log_post_prod_inc[1]);
-        bg_r = scale0 * suffix_scaled_r;
-        bg_g = scale0 * suffix_scaled_g;
-        bg_b = scale0 * suffix_scaled_b;
+    float T_excl = 1.0f;
+    for (int k = 1; k < K; k++) {
+        bg_r += T_excl * sorted_r[k][0];
+        bg_g += T_excl * sorted_r[k][1];
+        bg_b += T_excl * sorted_r[k][2];
+        T_excl *= sorted_a[k];
     }
 
     // ---- 5. Block rank (inverse permutation) ----
